@@ -1,0 +1,63 @@
+# Evo-Protocol experiment configuration
+
+benchmark:
+  name: cl-bench
+  data_path: data/CL-bench.jsonl
+  split_ratio:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  split_stratify_by: context_category
+
+evolution:
+  generations: 30
+  population_size: 8
+  elite_count: 3
+  tasks_per_evaluation: 50
+  failure_samples_per_mutation: 5
+  enable_failure_classifier: true
+  failure_classifier_model: gpt-4o
+  max_repair_attempts: 2
+  max_llm_calls_per_task: 10
+  timeout_seconds: 120
+  selection:
+    tau: 0.5
+    alpha: 0.5
+  meta_architect_model: gpt-4o
+  worker_model: gpt-4o-mini
+  seed: 42
+  archive_dir: archive
+
+baselines:
+  - name: vanilla
+    type: direct_call
+  - name: cot
+    type: direct_call
+    system_suffix: "Think step by step."
+  - name: react
+    type: react_loop
+  - name: rag
+    type: rag_pipeline
+    chunk_size: 1000
+  - name: metagpt
+    type: multi_agent_static
+  - name: gepa
+    type: prompt_evolution
+    generations: 30
+
+evaluation:
+  judge_model: gpt-5.1
+  workers: 20
+  max_retries: 3
+  final_eval_split: test
+
+transfer:
+  experiments:
+    - train: [Domain Knowledge Reasoning]
+      test: [Rule System Application]
+    - train: [Procedural Task Execution]
+      test: [Empirical Discovery & Simulation]
+    - train: [Domain Knowledge Reasoning, Rule System Application]
+      test: [Procedural Task Execution, Empirical Discovery & Simulation]
+    - train: [all]
+      test: [held_out]
