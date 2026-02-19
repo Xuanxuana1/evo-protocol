@@ -18,9 +18,11 @@ env/
 # Local environment/config secrets
 .env
 .env.*
+.env[0-9]*
 
 # Generated benchmark artifacts
 outputs/
+archive/smoke_*/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
