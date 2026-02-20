@@ -163,6 +163,80 @@ def _heuristic_feedback(
     )
 
 
+def _infer_default_mode(
+    context: str,
+    query: str,
+    model_answer: str,
+    judge_rationale: str,
+    unsatisfied_rubrics: list[str],
+    verification_passed: Optional[bool],
+    hint_mode: str | None = None,
+) -> str:
+    """Infer initial failure mode from observed behavior instead of task category."""
+
+    hint = _normalize_mode(hint_mode, fallback="F3") if hint_mode else "F3"
+    answer = str(model_answer or "").strip()
+    if not answer:
+        # Empty output usually means execution/retrieval collapse rather than category-specific failure.
+        return "F2" if (len(context) + len(query)) > 5000 else "F3"
+
+    if verification_passed is False:
+        return "F1"
+
+    signals = " ".join(
+        [
+            str(judge_rationale or ""),
+            " ".join(str(item) for item in unsatisfied_rubrics),
+        ]
+    ).lower()
+
+    retrieval_markers = (
+        "retrieve",
+        "retrieval",
+        "not found",
+        "did not mention",
+        "missing evidence",
+        "failed to extract",
+        "not in the response",
+        "context was available",
+        "appendix",
+    )
+    if any(marker in signals for marker in retrieval_markers):
+        return "F2"
+
+    instruction_markers = (
+        "did not follow",
+        "failed to follow",
+        "instruction",
+        "format",
+        "template",
+        "constraint",
+        "policy",
+        "required",
+        "must",
+        "prior knowledge",
+        "general knowledge",
+        "ignored",
+    )
+    if any(marker in signals for marker in instruction_markers):
+        return "F1"
+
+    induction_markers = (
+        "infer",
+        "inference",
+        "pattern",
+        "hypothesis",
+        "generalize",
+        "extrapolat",
+        "simulation",
+        "rule from examples",
+    )
+    if any(marker in signals for marker in induction_markers):
+        return "F4"
+
+    return hint if hint in {"F1", "F2", "F3", "F4"} else "F3"
+
+
 def classify_failure_mode(
     context: str,
     query: str,
@@ -179,7 +253,7 @@ def classify_failure_mode(
             "query": query,
             "model_output": model_answer,
             "eval_detail": {"expected_answer": correct_answer},
-            "metadata": {"gravity_type": "F3"},
+            "metadata": {},
             "verification_passed": None,
             "rubrics": [],
         },
@@ -220,11 +294,19 @@ def build_failure_feedback(
         verification_passed = payload.get("verification_passed", None)
         rubrics = payload.get("rubrics", [])
 
-    default_mode = _normalize_mode(str(metadata.get("gravity_type", "F3")), fallback="F3")
-
     judge_rationale = _extract_judge_rationale(eval_detail)
     status_list = eval_detail.get("List of Requirement Satisfaction Status") if isinstance(eval_detail, dict) else None
     unsatisfied_rubrics = _extract_unsatisfied_rubrics(rubrics, status_list)
+    hint_mode = _normalize_mode(str(metadata.get("gravity_type", "F3")), fallback="F3") if metadata else None
+    default_mode = _infer_default_mode(
+        context=context,
+        query=query,
+        model_answer=answer,
+        judge_rationale=judge_rationale,
+        unsatisfied_rubrics=unsatisfied_rubrics,
+        verification_passed=verification_passed,
+        hint_mode=hint_mode,
+    )
 
     heuristic = _heuristic_feedback(
         context=context,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +16,7 @@ from typing import Any
 from benchmarks.base import TaskRecord, get_benchmark
 from core.archive import ProtocolArchive
 from core.base_protocol import BaseProtocol
+from core.env_utils import env_float, env_int
 from core.failure_classifier import build_failure_feedback
 from core.meta_architect import MetaArchitect, ParentPerformance
 from core.protocol_loader import ProtocolLoader
@@ -31,6 +33,9 @@ class EvolutionConfig:
     failure_samples_per_mutation: int = 5
     enable_failure_classifier: bool = True
     failure_classifier_model: str = "gpt-4o"
+    enable_attention_drift: bool = True
+    attention_drift_model: str = "gpt-4o-mini"
+    attention_drift_sample_rate: float = 1.0
     max_repair_attempts: int = 2
     seed: int = 42
 
@@ -59,6 +64,10 @@ class EvolutionEngine:
         self.config = config or EvolutionConfig()
         self.judge_client = judge_client
         self.failure_classifier_client = failure_classifier_client or judge_client
+        self.config.attention_drift_sample_rate = max(
+            0.0,
+            min(1.0, float(self.config.attention_drift_sample_rate)),
+        )
         self.rng = random.Random(self.config.seed)
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.logs_dir = self.archive.dir / "_logs"
@@ -115,6 +124,7 @@ class EvolutionEngine:
 
         for generation in range(1, self.config.generations + 1):
             print(f"\n[Gen {generation}] evaluating {len(population)} protocols...")
+            sampled_tasks = self._sample_tasks(self.config.tasks_per_evaluation)
 
             for idx, candidate in enumerate(population, start=1):
                 fitness, mode_accuracy, failures, eval_summary = self._evaluate_protocol(
@@ -123,6 +133,7 @@ class EvolutionEngine:
                     candidate_index=idx,
                     candidate_total=len(population),
                     candidate_sha=candidate["sha"],
+                    sampled_tasks=sampled_tasks,
                 )
                 candidate["fitness"] = fitness
                 candidate["mode_accuracy"] = mode_accuracy
@@ -144,6 +155,8 @@ class EvolutionEngine:
                     "num_failures": len(failures),
                     "failure_mode_counts": eval_summary.get("failure_mode_counts", {}),
                     "avg_tokens_per_task": eval_summary.get("avg_tokens_per_task", 0.0),
+                    "attention_drift_mean": eval_summary.get("attention_drift_mean"),
+                    "attention_drift_high_rate": eval_summary.get("attention_drift_high_rate"),
                     "top_root_causes": eval_summary.get("top_root_causes", [])[:3],
                     "time": self._now_iso(),
                 }
@@ -158,12 +171,15 @@ class EvolutionEngine:
             ranked = sorted(population, key=lambda item: item["fitness"], reverse=True)
             elites = ranked[: max(1, self.config.elite_count)]
             best = elites[0]
+            diversity = self._compute_population_diversity(ranked)
             gen_record = {
                 "generation": generation,
                 "best_sha": best["sha"],
                 "best_fitness": best["fitness"],
                 "mean_fitness": mean([item["fitness"] for item in ranked]),
                 "unique_protocols": len({item["sha"] for item in ranked}),
+                "code_diversity": diversity["code_diversity"],
+                "unique_sha_ratio": diversity["unique_sha_ratio"],
                 "best_failure_summary": best.get("eval_summary", {}),
             }
             history.append(gen_record)
@@ -178,7 +194,8 @@ class EvolutionEngine:
             )
             print(
                 f"[Gen {generation}] best={gen_record['best_fitness']:.4f} "
-                f"mean={gen_record['mean_fitness']:.4f}"
+                f"mean={gen_record['mean_fitness']:.4f} "
+                f"diversity={gen_record['code_diversity']:.4f}"
             )
 
             if generation == self.config.generations:
@@ -262,14 +279,16 @@ class EvolutionEngine:
         candidate_index: int,
         candidate_total: int,
         candidate_sha: str,
+        sampled_tasks: list[TaskRecord],
     ) -> tuple[float, dict[str, float], list[dict[str, Any]], dict[str, Any]]:
         """Run protocol on sampled train tasks and compute fitness/failure traces."""
 
-        sampled = self._sample_tasks(self.config.tasks_per_evaluation)
+        sampled = sampled_tasks
         scores: list[float] = []
-        by_mode: dict[str, list[float]] = {}
+        failure_mode_counter: Counter[str] = Counter()
         failures: list[dict[str, Any]] = []
         token_usage: list[int] = []
+        attention_drift_values: list[float] = []
 
         for task_idx, task in enumerate(sampled, start=1):
             record = TaskRecord(
@@ -289,7 +308,8 @@ class EvolutionEngine:
                 "task_index": task_idx,
                 "task_total": len(sampled),
                 "task_id": record.task_id,
-                "gravity_type": str(record.metadata.get("gravity_type", "unknown")),
+                "context_category": str(record.metadata.get("context_category", "unknown")),
+                "sub_category": str(record.metadata.get("sub_category", "unknown")),
             }
 
             print(
@@ -373,8 +393,21 @@ class EvolutionEngine:
                 },
             )
 
-            eval_mode = str(record.metadata.get("gravity_type", "unknown"))
-            by_mode.setdefault(eval_mode, []).append(score)
+            attention_drift = self._measure_attention_drift(record, effective_context=effective_context)
+            if attention_drift is not None:
+                attention_drift_values.append(float(attention_drift.get("score", 0.0)))
+                self._append_jsonl(
+                    self.task_trace_path,
+                    {
+                        "run_id": self.run_id,
+                        "event": "attention_drift",
+                        "time": self._now_iso(),
+                        "attention_drift_score": float(attention_drift.get("score", 0.0)),
+                        "attention_drift_source": str(attention_drift.get("source", "unknown")),
+                        "attention_drift_rationale": str(attention_drift.get("rationale", ""))[:200],
+                        **task_info,
+                    },
+                )
 
             if score < 1:
                 classifier_timer = perf_counter()
@@ -389,8 +422,9 @@ class EvolutionEngine:
                 )
                 failure_feedback = self._build_failure_feedback(record)
                 classifier_seconds = perf_counter() - classifier_timer
-                failure_mode = str(failure_feedback.get("mode", eval_mode))
+                failure_mode = str(failure_feedback.get("mode", "F3") or "F3")
                 record.failure_mode = failure_mode
+                failure_mode_counter[failure_mode] += 1
                 self._append_jsonl(
                     self.task_trace_path,
                     {
@@ -444,13 +478,18 @@ class EvolutionEngine:
                 f"tokens={int(record.tokens_used)} elapsed={task_seconds:.1f}s"
             )
 
-        mode_acc = {mode: (sum(vals) / len(vals) if vals else 0.0) for mode, vals in by_mode.items()}
+        total_tasks = float(len(sampled) or 1)
+        mode_acc = {
+            mode: max(0.0, 1.0 - float(failure_mode_counter.get(mode, 0)) / total_tasks)
+            for mode in ("F1", "F2", "F3", "F4")
+        }
         fitness = sum(scores) / len(scores) if scores else 0.0
         eval_summary = self._summarize_failures(
             failures=failures,
             num_tasks=len(sampled),
             fitness=fitness,
             token_usage=token_usage,
+            attention_drift_values=attention_drift_values,
         )
         return fitness, mode_acc, failures, eval_summary
 
@@ -483,10 +522,10 @@ class EvolutionEngine:
     def _build_parent_performance(mode_accuracy: dict[str, float], overall: float) -> ParentPerformance:
         return ParentPerformance(
             overall=overall,
-            f1=mode_accuracy.get("F1", 0.0),
-            f2=mode_accuracy.get("F2", 0.0),
-            f3=mode_accuracy.get("F3", 0.0),
-            f4=mode_accuracy.get("F4", 0.0),
+            f1=mode_accuracy.get("F1", overall),
+            f2=mode_accuracy.get("F2", overall),
+            f3=mode_accuracy.get("F3", overall),
+            f4=mode_accuracy.get("F4", overall),
         )
 
     def _build_failure_feedback(self, record: TaskRecord) -> dict[str, Any]:
@@ -499,12 +538,166 @@ class EvolutionEngine:
             model=self.config.failure_classifier_model,
         )
 
+    def _measure_attention_drift(
+        self,
+        record: TaskRecord,
+        effective_context: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Estimate context-faithfulness drift (0=faithful, 1=parametric override)."""
+
+        if not self.config.enable_attention_drift:
+            return None
+        if self.config.attention_drift_sample_rate <= 0:
+            return None
+        if self.rng.random() > self.config.attention_drift_sample_rate:
+            return None
+
+        answer = str(record.model_output or "").strip()
+        context = str(effective_context if effective_context is not None else record.context or "")
+        query = str(record.query or "")
+
+        if not answer:
+            return {
+                "score": 1.0,
+                "source": "heuristic_empty",
+                "rationale": "Empty output treated as maximum drift.",
+            }
+
+        if self.judge_client is None:
+            return self._heuristic_attention_drift(answer=answer, context=context)
+
+        timeout_seconds = env_float(
+            [
+                "ATTENTION_DRIFT_API_TIMEOUT_SECONDS",
+                "JUDGE_API_TIMEOUT_SECONDS",
+                "OPENAI_API_TIMEOUT_SECONDS",
+                "OPENAI_API_TIMEOUT",
+                "API_TIMEOUT_SECONDS",
+            ],
+            default=45.0,
+        )
+        max_tokens = env_int(
+            ["ATTENTION_DRIFT_MAX_TOKENS", "OPENAI_MAX_TOKENS", "MAX_TOKENS"],
+            default=512,
+        )
+
+        prompt = (
+            "Rate context faithfulness drift for the answer on a 0-1 scale.\n"
+            "0 means fully grounded in provided context.\n"
+            "1 means answer ignores context and relies on outside priors.\n"
+            "Return JSON only with keys: drift, rationale.\n\n"
+            f"Query:\n{query[:1200]}\n\n"
+            f"Context excerpt:\n{context[:3000]}\n\n"
+            f"Answer:\n{answer[:1800]}\n"
+        )
+
+        try:
+            response = self.judge_client.chat.completions.create(
+                model=self.config.attention_drift_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=max_tokens,
+                timeout=timeout_seconds,
+            )
+            raw = str(response.choices[0].message.content or "").strip()
+            parsed = self._extract_json_from_text(raw)
+            if isinstance(parsed, dict):
+                drift = self._parse_drift_score(parsed.get("drift"))
+                if drift is not None:
+                    return {
+                        "score": drift,
+                        "source": "judge",
+                        "rationale": str(parsed.get("rationale", ""))[:300],
+                    }
+
+            numeric = self._parse_drift_score(raw)
+            if numeric is not None:
+                return {
+                    "score": numeric,
+                    "source": "judge_numeric",
+                    "rationale": "",
+                }
+        except Exception as exc:
+            heuristic = self._heuristic_attention_drift(answer=answer, context=context)
+            heuristic["source"] = "heuristic_fallback"
+            heuristic["rationale"] = f"Judge failed: {str(exc)[:200]}"
+            return heuristic
+
+        return self._heuristic_attention_drift(answer=answer, context=context)
+
+    @staticmethod
+    def _heuristic_attention_drift(answer: str, context: str) -> dict[str, Any]:
+        """Lexical-overlap fallback for attention drift when judge is unavailable."""
+
+        answer_tokens = set(re.findall(r"[A-Za-z0-9_]{3,}", answer.lower()))
+        context_tokens = set(re.findall(r"[A-Za-z0-9_]{3,}", context.lower()))
+        if not answer_tokens:
+            return {"score": 1.0, "source": "heuristic_empty", "rationale": "Answer has no lexical tokens."}
+        overlap = len(answer_tokens & context_tokens) / max(1, len(answer_tokens))
+        drift = 1.0 - overlap
+        return {
+            "score": float(max(0.0, min(1.0, drift))),
+            "source": "heuristic_overlap",
+            "rationale": "Drift estimated from answer-context lexical overlap.",
+        }
+
+    @staticmethod
+    def _extract_json_from_text(raw: str) -> dict[str, Any] | None:
+        """Extract first JSON object from plain/fenced model output."""
+
+        text = str(raw or "").strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_drift_score(raw: Any) -> float | None:
+        """Parse and clamp drift score to [0,1]."""
+
+        if isinstance(raw, (float, int)):
+            return float(max(0.0, min(1.0, float(raw))))
+
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            return float(max(0.0, min(1.0, float(text))))
+        except (TypeError, ValueError):
+            pass
+
+        match = re.search(r"([01](?:\.\d+)?)", text)
+        if not match:
+            return None
+        try:
+            return float(max(0.0, min(1.0, float(match.group(1)))))
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _summarize_failures(
         failures: list[dict[str, Any]],
         num_tasks: int,
         fitness: float,
         token_usage: list[int],
+        attention_drift_values: list[float],
     ) -> dict[str, Any]:
         """Build compact, generation-level failure summary for archive metadata."""
 
@@ -542,6 +735,13 @@ class EvolutionEngine:
         avg_tokens = (sum(token_usage) / len(token_usage)) if token_usage else 0.0
         max_tokens = max(token_usage) if token_usage else 0
         num_failures = len(failures)
+        drift_count = len(attention_drift_values)
+        drift_mean = (sum(attention_drift_values) / drift_count) if drift_count else None
+        drift_high_rate = (
+            sum(1 for value in attention_drift_values if float(value) >= 0.67) / drift_count
+            if drift_count
+            else None
+        )
 
         return {
             "num_tasks": int(num_tasks),
@@ -550,11 +750,47 @@ class EvolutionEngine:
             "accuracy": float(fitness),
             "avg_tokens_per_task": float(avg_tokens),
             "max_tokens_per_task": int(max_tokens),
+            "token_efficiency": float(fitness / avg_tokens) if avg_tokens > 0 else 0.0,
             "verification_failed_count": int(verification_failed),
+            "attention_drift_mean": drift_mean,
+            "attention_drift_high_rate": drift_high_rate,
+            "attention_drift_measured_tasks": int(drift_count),
             "failure_mode_counts": dict(mode_counter),
             "top_root_causes": [text for text, _ in root_cause_counter.most_common(5)],
             "top_repair_actions": [text for text, _ in action_counter.most_common(8)],
             "top_unsatisfied_rubrics": [text for text, _ in rubric_counter.most_common(8)],
+        }
+
+    @staticmethod
+    def _compute_population_diversity(population: list[dict[str, Any]]) -> dict[str, float]:
+        """Measure code-space diversity for one generation."""
+
+        codes = [str(item.get("code", "")) for item in population]
+        shas = [str(item.get("sha", "")) for item in population]
+        size = len(codes)
+        if size <= 1:
+            return {
+                "code_diversity": 0.0,
+                "unique_sha_ratio": 1.0 if size == 1 else 0.0,
+            }
+
+        token_sets = [set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code)) for code in codes]
+        distances: list[float] = []
+        for left in range(size):
+            for right in range(left + 1, size):
+                a = token_sets[left]
+                b = token_sets[right]
+                union = len(a | b)
+                if union == 0:
+                    distances.append(0.0)
+                else:
+                    distances.append(1.0 - (len(a & b) / union))
+
+        diversity = (sum(distances) / len(distances)) if distances else 0.0
+        unique_sha_ratio = len({sha for sha in shas if sha}) / max(1, size)
+        return {
+            "code_diversity": float(diversity),
+            "unique_sha_ratio": float(unique_sha_ratio),
         }
 
     @staticmethod

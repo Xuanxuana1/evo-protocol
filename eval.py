@@ -380,29 +380,40 @@ def main():
         # Single-threaded
         for task in tqdm(tasks, desc="Evaluating"):
             idx, result, error = process_single_item(task)
-            
+
+            if result is not None:
+                append_jsonl(result, args.output)
             if error:
                 fail_count += 1
             else:
-                append_jsonl(result, args.output)
                 success_count += 1
     else:
         # Multi-threaded
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(process_single_item, task): task[0].get("idx") for task in tasks}
+            futures = {executor.submit(process_single_item, task): task for task in tasks}
             
             with tqdm(total=len(tasks), desc="Evaluating") as pbar:
                 for future in as_completed(futures):
+                    task = futures[future]
+                    item = task[0]
                     try:
                         idx, result, error = future.result()
-                        
+
+                        if result is not None:
+                            append_jsonl(result, args.output)
                         if error:
                             fail_count += 1
                         else:
-                            append_jsonl(result, args.output)
                             success_count += 1
                     except Exception as e:
                         log(f"   ❌ Exception: {str(e)}")
+                        fallback = {
+                            **item,
+                            "grading_rationale": f"Worker exception (counted as score 0): {str(e)[:300]}",
+                            "requirement_status": [],
+                            "score": 0,
+                        }
+                        append_jsonl(fallback, args.output)
                         fail_count += 1
                     pbar.update(1)
     

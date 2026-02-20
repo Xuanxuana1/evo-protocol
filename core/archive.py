@@ -124,6 +124,10 @@ class ProtocolArchive:
                 "num_tasks": int(failure_summary.get("num_tasks", 0)),
                 "num_failures": int(failure_summary.get("num_failures", 0)),
                 "failure_rate": float(failure_summary.get("failure_rate", 0.0)),
+                "token_efficiency": float(failure_summary.get("token_efficiency", 0.0)),
+                "attention_drift_mean": failure_summary.get("attention_drift_mean"),
+                "attention_drift_high_rate": failure_summary.get("attention_drift_high_rate"),
+                "attention_drift_measured_tasks": int(failure_summary.get("attention_drift_measured_tasks", 0)),
                 "failure_mode_counts": dict(failure_summary.get("failure_mode_counts", {})),
                 "top_root_causes": list(failure_summary.get("top_root_causes", [])),
             }

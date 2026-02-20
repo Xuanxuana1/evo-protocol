@@ -16,15 +16,15 @@ evolution:
   tasks_per_evaluation: 50
   failure_samples_per_mutation: 5
   enable_failure_classifier: true
-  failure_classifier_model: gpt-4o
+  failure_classifier_model: Pro/MiniMaxAI/MiniMax-M2.5
   max_repair_attempts: 2
   max_llm_calls_per_task: 10
-  timeout_seconds: 120
+  timeout_seconds: 300
   selection:
     tau: 0.5
     alpha: 0.5
-  meta_architect_model: gpt-4o
-  worker_model: gpt-4o-mini
+  meta_architect_model: Pro/MiniMaxAI/MiniMax-M2.5
+  worker_model: Pro/MiniMaxAI/MiniMax-M2.5
   seed: 42
   archive_dir: archive
 
@@ -46,10 +46,13 @@ baselines:
     generations: 30
 
 evaluation:
-  judge_model: gpt-5.1
+  judge_model: Pro/MiniMaxAI/MiniMax-M2.5
   workers: 20
   max_retries: 3
   final_eval_split: test
+  enable_attention_drift: true
+  attention_drift_model: Pro/MiniMaxAI/MiniMax-M2.5
+  attention_drift_sample_rate: 1.0
 
 transfer:
   experiments:

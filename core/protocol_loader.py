@@ -114,7 +114,7 @@ class ProtocolLoader:
         self,
         llm_client,
         model_name: str,
-        timeout_seconds: int = 120,
+        timeout_seconds: int = 300,
         use_process_timeout: bool = True,
     ):
         self.llm_client = llm_client

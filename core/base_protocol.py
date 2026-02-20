@@ -87,13 +87,19 @@ class BaseProtocol(ABC):
 
             feedback = "Previous answer failed verification. Re-check context contradictions and missing steps."
 
+        trace.append("[Guardrail] verification_failed -> output_blocked")
         return ProtocolResult(
-            answer=last_answer,
-            confidence=0.1,
+            answer="",
+            confidence=0.0,
             reasoning_trace=trace,
             verification_passed=False,
             tokens_used=self._task_tokens_used,
-            metadata={"attempts": max_retries + 1, "llm_calls": self._call_count},
+            metadata={
+                "attempts": max_retries + 1,
+                "llm_calls": self._call_count,
+                "output_blocked": True,
+                "blocked_answer_preview": last_answer[:500],
+            },
         )
 
     def _call_llm(self, messages: list[dict[str, str]], temperature: float = 0.0) -> str:

@@ -15,13 +15,6 @@ from benchmarks.base import BaseBenchmark, TaskRecord, register_benchmark
 class CLBenchmark(BaseBenchmark):
     """CL-bench adapter with deterministic stratified split and judge-based scoring."""
 
-    CATEGORY_TO_MODE = {
-        "Domain Knowledge Reasoning": "F1",
-        "Rule System Application": "F2",
-        "Procedural Task Execution": "F3",
-        "Empirical Discovery & Simulation": "F4",
-    }
-
     def __init__(
         self,
         split_ratio: dict[str, float] | None = None,
@@ -50,7 +43,6 @@ class CLBenchmark(BaseBenchmark):
                 messages = raw.get("messages", [])
                 context, query = self._extract_context_and_query(messages)
                 metadata = dict(raw.get("metadata", {}))
-                category = metadata.get("context_category", "")
 
                 records.append(
                     TaskRecord(
@@ -62,7 +54,6 @@ class CLBenchmark(BaseBenchmark):
                         metadata={
                             **metadata,
                             "idx": idx,
-                            "gravity_type": self.CATEGORY_TO_MODE.get(category, "F1"),
                         },
                     )
                 )
@@ -81,13 +72,13 @@ class CLBenchmark(BaseBenchmark):
         if not record.model_output or not record.model_output.strip():
             record.score = 0
             record.eval_detail = {"reason": "Empty model output"}
-            record.failure_mode = record.metadata.get("gravity_type")
+            record.failure_mode = None
             return record
 
         if judge_client is None:
             record.score = 0
             record.eval_detail = {"reason": "judge_client is required for rubric grading"}
-            record.failure_mode = record.metadata.get("gravity_type")
+            record.failure_mode = None
             return record
 
         from eval import build_rubrics_text, call_judge_api
@@ -98,7 +89,7 @@ class CLBenchmark(BaseBenchmark):
         if not raw_judge:
             record.score = 0
             record.eval_detail = {"reason": "Judge API failed"}
-            record.failure_mode = record.metadata.get("gravity_type")
+            record.failure_mode = None
             return record
 
         try:
@@ -111,7 +102,7 @@ class CLBenchmark(BaseBenchmark):
             record.eval_detail = {"reason": "Judge parse failure", "raw": raw_judge[:500]}
 
         if record.score == 0:
-            record.failure_mode = record.metadata.get("gravity_type")
+            record.failure_mode = None
 
         return record
 
