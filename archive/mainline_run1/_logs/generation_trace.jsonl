@@ -1,1 +1,0 @@
-{"run_id": "20260219_225804", "event": "run_start", "time": "2026-02-19T22:58:04", "generations": 30, "population_size": 8, "elite_count": 3, "tasks_per_evaluation": 20, "benchmark": "cl-bench"}
