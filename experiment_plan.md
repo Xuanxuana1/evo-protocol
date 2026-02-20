@@ -1,4 +1,4 @@
-# Context-as-Sandbox (CaS): Evolving Neuro-Symbolic Context Compilers with Strictly Typed Neural Oracles
+# Evolving Context Learning: From Context-as-Sandbox to Test-Driven Generation
 
 ## Experiment Manual
 
@@ -8,186 +8,188 @@
 
 ### Paper Title
 
-**Context-as-Sandbox: Migrating Context Learning from Natural Language Space to Symbolic Execution Space via Evolved Neuro-Symbolic Compilers**
+**Evolving Context Learning via Test-Driven Generation: Deterministic Verification of Natural Language Answers through Evolved Python Test Suites**
 
 ### One-Line Pitch
 
-We evolve LLM-generated **Python context compilers** that transform natural language context into executable sandbox environments with strictly typed Neural Oracles, then answer queries via deterministic code execution rather than probabilistic text generation.
+We evolve LLM-generated **Python test compilers** that validate natural language answers against context-derived test functions, using deterministic Python execution as the verifier while preserving full NL generation capabilities.
 
 ### Motivation
 
 CL-bench (Tencent Hunyuan, 2026) exposes a devastating finding: even GPT-5.1 achieves only **23.7% solving rate** on 1,899 expert-annotated context learning tasks. Models fail because their parametric memory actively overrides contextual information -- a phenomenon we call **Parametric Gravity**.
 
-Existing approaches (ALMA, Reflection-Driven Control, Agentic Context Engineering) all operate in "natural language space": structured reflection produces natural language feedback that rewrites natural language interaction protocols. This is fundamentally limited because LLMs process both context and answers in the same probabilistic text space where parametric gravity operates.
+**CaS (Context-as-Sandbox)** attempted to address this by compiling context into executable Python objects, then answering queries via deterministic code execution. However, CaS faces critical limitations:
+1. Context truncated to fit code generation windows (tasks up to 150k chars)
+2. The compile-then-solve pipeline cannot produce persona/tone/style-compliant NL
+3. Evolution stalls when accuracy = 0 (no fitness gradient)
 
-**Core Insight**: LLM Text-to-Code has higher logical rigor than Text-to-Text. A Python interpreter won't tolerate parametric gravity hallucinations. If the sandbox encodes `banana.color = "purple"` with `assert banana.color == "purple"`, any code outputting `"yellow"` raises an `AssertionError` at runtime. By migrating context learning from natural language space to symbolic execution space, we exploit the deterministic guarantees of code execution to counteract probabilistic context-learning failures.
+**TDG (Test-Driven Generation)** keeps CaS's core insight (deterministic Python verification) but flips the pipeline:
+- **CaS**: compile context -> code objects -> code solver -> extract answer
+- **TDG**: compile context -> **test functions** -> LLM generates NL answer -> **Python verifies** -> repair if needed
+
+Key property: **worst case degrades to direct inference** (never worse than baseline).
 
 ### Key Differentiation
 
-| Dimension | GEPA | ALMA | Evo-Protocol v1 | **CaS (Ours)** |
-|-----------|------|------|-----------------|----------------|
-| Search object | System prompts (NL) | Memory modules (code) | Full protocols (prompt + code) | **Context compilers (NL -> executable sandbox)** |
-| Answer space | Probabilistic text | Probabilistic text | Probabilistic text | **Deterministic code execution** |
-| Context repr. | Raw text | Structured memory | Structured signals | **Live Python objects + Neural Oracles** |
-| Failure signal | Binary | Reflection text | 4-mode classifier | **2-stage pipeline + 4-mode classifier** |
-| Evolution target | Prompt tokens | Memory ops | perception/cognition/verify | **compile_sandbox / generate_solver** |
-| Verification | LLM-based (soft) | LLM-based (soft) | LLM-based (soft) | **Python interpreter (hard)** |
+| Dimension | GEPA | ALMA | CaS | **TDG (Ours)** |
+|-----------|------|------|-----|----------------|
+| Search object | System prompts (NL) | Memory modules (code) | Context compilers | **Test compilers + answer generators** |
+| Answer space | Probabilistic text | Probabilistic text | Deterministic code | **NL text, verified by code** |
+| Context repr. | Raw text | Structured memory | Live Python objects | **Python test functions** |
+| Context limit | Full | Full | Truncated | **Full (no truncation)** |
+| Failure signal | Binary | Reflection text | 2-stage pipeline | **Per-test pass/fail + repair** |
+| Evolution target | Prompt tokens | Memory ops | compile/solve | **compile_tests / generate_answer** |
+| Verification | LLM-based (soft) | LLM-based (soft) | Python interpreter (hard) | **Python test runner (hard)** |
+| Worst case | Baseline | Baseline | Empty answer | **Direct inference (= baseline)** |
 
 ---
 
-## 2. Architecture: 2-Method Co-Evolution
+## 2. Architecture: TDG 4-Stage Pipeline
 
 ### Design Rationale
 
-We choose a **2-method interface** over alternatives:
+TDG addresses CaS's limitations while preserving its strengths:
 
-- **3-method (compile/query/verify)**: Re-introducing a `verify()` method reintroduces the probabilistic "softness" we are trying to escape. The Python interpreter IS the verifier -- AssertionErrors, ValidationErrors, and NameErrors are deterministic verification.
-
-- **Single compile() only**: Data structures and algorithms are inextricably coupled. If the Meta-Agent evolves a NetworkX graph for spatial reasoning, a fixed solver using dict lookups will catastrophically fail. The Meta-Agent must co-evolve both representation and action.
-
-- **2-method (compile/solve)**: The sweet spot. `compile_sandbox` isolates Representation (defeating Context Navigation Failure). `generate_solver` isolates Action (defeating Parametric Override and Reasoning Breakdown). The execution runtime is FIXED infrastructure.
+1. **Full context access**: `generate_answer` receives the complete context (no truncation)
+2. **NL answer quality**: Answers are generated as natural language, not extracted from code
+3. **Deterministic verification**: Python tests catch factual errors, format violations, and constraint breaches
+4. **Graceful degradation**: If test compilation fails, the answer is returned as-is (= direct inference)
+5. **Dense fitness signal**: `test_pass_rate` provides a gradient even when rubric accuracy = 0
 
 ### Base Interface
 
 ```python
-class BaseCaSCompiler(ABC):
+class BaseTDGCompiler(ABC):
     """The Meta-Agent evolves ONLY these two methods."""
 
-    def compile_sandbox(self, context: str) -> str:
-        """Phase 1: Representation.
-        LLM generates Python code creating typed objects from context.
+    def compile_tests(self, context: str, query: str) -> str:
+        """Phase 1: Test Generation.
+        LLM generates Python test functions from context+query.
+        Each test_* function accepts an answer string and asserts properties.
         Returns executable Python code string."""
 
-    def generate_solver(self, query: str, sandbox_schema: str) -> str:
-        """Phase 2: Action.
-        LLM generates Python code querying sandbox objects.
-        Must set FINAL_ANSWER variable. Returns code string."""
+    def generate_answer(self, context: str, query: str, messages_raw: list = None) -> str:
+        """Phase 2: Answer Generation.
+        LLM generates a natural language answer from full context+query.
+        Returns answer string."""
 ```
 
 ### Fixed Deterministic Runtime (Immutable)
 
-```python
-def deterministic_runtime(compiler, context, query):
-    # Phase 1: Compile context
-    env_code = compiler.compile_sandbox(context)
-
-    # Phase 2: Generate solver
-    solver_code = compiler.generate_solver(query, env_code)
-
-    # Phase 3: DETERMINISTIC execution (the Ultimate Verifier)
-    namespace = {}
-    exec(env_code + "\n" + solver_code, namespace)
-    return namespace.get("FINAL_ANSWER")
-    # AssertionError -> constraint violation (gravity blocked!)
-    # NameError -> missing fact (context navigation failure!)
-    # TypeError -> type mismatch (reasoning breakdown!)
+```
+Input: context + query + messages_raw
+         |
+    [Phase 1] compile_tests(context, query)
+         -> test_code (Python with def test_* functions)
+         -> sanitize, validate syntax, extract test names
+         |
+    [Phase 2] generate_answer(context, query, messages_raw)
+         -> draft answer (natural language)
+         |
+    [Phase 3] Verify: run each test_*(answer) in sandbox
+         -> {test_name: True/False} dict
+         |
+    [Phase 4] Repair loop (if any test failed):
+         -> build feedback from failed test names + test code
+         -> re-generate answer with feedback
+         -> re-verify (up to max_retries)
+         |
+Output: SandboxResult with answer + test_pass_rate + metadata
 ```
 
-The Meta-Agent CANNOT modify the runtime. It can only evolve how it prompts the LLM inside `compile_sandbox` and `generate_solver`.
+**Graceful degradation**: If compile_tests fails or no test_* functions found -> return generate_answer result as-is.
 
-### Two-Stage Failure Decomposition
-
-```
-Context --> compile_sandbox --> env_code --> generate_solver --> solver_code --> exec() --> FINAL_ANSWER
-              compile error?                   bad solver?        runtime error?    wrong answer?
-              (Stage 1)                        (Stage 2)          (Stage 3)         (Stage 4)
-```
-
----
-
-## 3. Neural Oracles: Bridging the Semantic-Symbolic Gap
-
-### The Problem
-
-Pure symbolic compilation is impossible for all natural language. Nuanced prose, implicit sentiment, and ambiguous pragmatics cannot always be extracted into Pydantic schemas or NetworkX DAGs. But unconstrained LLM reasoning is vulnerable to Parametric Gravity.
-
-### The Solution: Strictly Typed Neural Oracles
-
-CaS introduces a middle ground: **Neural Oracles** -- LLM calls that are strictly bounded by type signatures and single-task perception.
-
-The sandbox code can call `_oracle(prompt, return_type)` where:
-- `_oracle(prompt, bool)` -> True/False only
-- `_oracle(prompt, int)` -> single integer
-- `_oracle(prompt, float)` -> single decimal
-- `_oracle(prompt, str)` -> brief text (one sentence max)
-
-**Key principle**: Python handles the syntax of reasoning (loops, conditionals, state tracking). The LLM acts as a semantic primitive (a perception function that takes text and returns typed values).
-
-### Example: Nuanced Contract Analysis
-
-Context: *"Despite the standard 30-day return policy, the manager's vaguely dismissive tone implies they have no intention of honoring it."*
+### Test Runner Pattern
 
 ```python
-# Compiled Sandbox Environment
-class ReturnPolicyState:
-    def __init__(self, context_text):
-        self.context = context_text
-        self.standard_policy_days = 30
-
-    def is_voided_by_behavior(self):
-        """Neural Oracle: semantic perception, NOT reasoning."""
-        return _oracle(
-            f"Does this text imply refusal to honor agreement? {self.context}",
-            bool
-        )
-
-policy = ReturnPolicyState(CONTEXT)
-
-# Solver Code (deterministic logic)
-if policy.is_voided_by_behavior():
-    FINAL_ANSWER = "0 days (contract effectively void)"
-else:
-    FINAL_ANSWER = f"{policy.standard_policy_days} days"
+# Avoids banned locals() call
+runner = test_code + "\n\n"
+runner += f"_answer = {repr(answer)}\n"
+runner += "_test_results = {}\n"
+for name in test_names:
+    runner += f"try:\n    {name}(_answer)\n    _test_results['{name}'] = True\n"
+    runner += f"except Exception:\n    _test_results['{name}'] = False\n"
 ```
 
-**Why this works**:
-- The LLM is never asked the final query (where parametric priors would dominate)
-- Only asked a micro-perception question: "Is the tone dismissive?"
-- All reasoning (if void -> 0, else -> 30) is deterministic Python
+---
 
-### Textual Backpropagation
+## 3. Neural Oracles in Tests
 
-Neural Oracles enable precise failure attribution:
-- If `_oracle` returns wrong perception -> improve oracle prompt in `compile_sandbox`
-- If logic is wrong despite correct perception -> fix solver code in `generate_solver`
-- If sandbox missing facts -> add more objects in `compile_sandbox`
+### Semantic Testing
+
+Tests can call `_oracle(prompt, return_type)` for checks that cannot be expressed as string operations:
+
+```python
+def test_formal_tone(answer):
+    """Neural Oracle: semantic perception check."""
+    assert _oracle(f"Is this text written in a formal tone? {answer}", bool)
+
+def test_factual_accuracy(answer):
+    """Hybrid: string + oracle check."""
+    assert "purple" in answer.lower()  # Deterministic
+    assert _oracle(f"Does this answer correctly describe the sky as purple? {answer}", bool)
+```
+
+### Anti-Parametric-Override Tests
+
+```python
+def test_context_specific_facts(answer):
+    """Assert facts that contradict common knowledge."""
+    # Context says "the capital of France is Lyon" (counterfactual)
+    assert "lyon" in answer.lower(), "Answer must use context fact, not parametric knowledge"
+    assert "paris" not in answer.lower(), "Answer must not use parametric override"
+```
 
 ---
 
-## 4. Compilation Strategy Taxonomy
+## 4. CaS vs TDG Comparison
 
-| Context Type | Data Structure | Oracle Use | Example |
-|-------------|---------------|-----------|---------|
-| Factual/Override-prone | Pydantic + validators | Minimal | `assert planet.gravity == 3.7` |
-| Spatial/Relational | networkx.Graph | Edge semantics | `_oracle("Is X reachable from Y?", bool)` |
-| Temporal/Sequential | Enums, state machines | State transitions | `_oracle("Has state changed?", bool)` |
-| Rule-based | Dict + callable functions | Rule interpretation | `_oracle("Does exception apply?", bool)` |
-| Tabular | list[dataclass] | N/A | Direct attribute lookup |
-| Nuanced/Semantic | Oracle-heavy classes | Heavy | `_oracle("What is the implied meaning?", str)` |
+### CaS Pipeline (Kept as Baseline)
+
+```
+Context -> compile_sandbox -> env_code -> generate_solver -> solver_code -> exec() -> FINAL_ANSWER
+```
+
+**Strengths**: Full deterministic execution, no LLM in final answer path
+**Weaknesses**: Context truncation, cannot produce NL, no fitness gradient at accuracy=0
+
+### TDG Pipeline (New)
+
+```
+Context -> compile_tests -> test_code -> generate_answer -> NL answer -> verify -> repair -> answer
+```
+
+**Strengths**: Full context, NL answers, graceful degradation, dense fitness signal
+**Weaknesses**: Tests may be too permissive, answer repair limited by LLM calls
 
 ---
 
-## 5. Four Failure Modes Through CaS Lens
+## 5. Five Failure Modes Through TDG Lens
 
 ### F1: Parametric Override
-- **Mechanism**: Solver code uses parametric knowledge instead of sandbox values
-- **CaS defense**: Assertions in sandbox catch violations at runtime (AssertionError)
-- **Evolution response**: Add Pydantic validators, more assertions, Neural Oracles for semantic verification
+- **Mechanism**: LLM generates answer using parametric knowledge instead of context
+- **TDG defense**: Anti-override tests assert context-specific facts that contradict common knowledge
+- **Evolution response**: More anti-parametric-override tests, stronger factual assertions
 
 ### F2: Context Navigation Failure
-- **Mechanism**: `compile_sandbox` misses encoding a fact -> NameError when solver accesses it
-- **CaS defense**: Missing data = missing namespace key = immediate runtime error
-- **Evolution response**: More comprehensive fact extraction, Neural Oracles for ambiguous facts
+- **Mechanism**: Answer misses key evidence from context
+- **TDG defense**: Keyword/fact presence tests catch missing evidence
+- **Evolution response**: More comprehensive factual extraction tests
 
 ### F3: Reasoning Breakdown
-- **Mechanism**: `generate_solver` produces logically flawed code
-- **CaS defense**: Python executes exactly what's written -- no probabilistic collapse
-- **Evolution response**: Move multi-step logic to Python loops/functions, use oracles only for perception
+- **Mechanism**: Multi-step reasoning collapses in answer generation
+- **TDG defense**: Tests check intermediate reasoning steps and logical consistency
+- **Evolution response**: Tests for step-by-step reasoning artifacts
 
 ### F4: Induction Failure
-- **Mechanism**: `compile_sandbox` doesn't create callable rule functions from examples
-- **CaS defense**: Pattern application becomes deterministic lookup/function call
-- **Evolution response**: Create lookup tables and callable rule functions
+- **Mechanism**: Pattern/rule application fails
+- **TDG defense**: Tests check that patterns from context examples are applied correctly
+- **Evolution response**: Pattern application tests derived from context examples
+
+### F5: Test Quality (TDG-specific)
+- **Mechanism**: Tests are too permissive (pass bad answers) or too strict (reject good answers)
+- **TDG defense**: Evolution optimizes test quality via test_pass_rate + accuracy correlation
+- **Evolution response**: Better test design, balanced strictness
 
 ---
 
@@ -199,25 +201,26 @@ Neural Oracles enable precise failure attribution:
 for generation in 1..N:
     for candidate in population:
         for task in sampled_tasks:
-            env_code    = candidate.compile_sandbox(task.context)
-            solver_code = candidate.generate_solver(task.query, env_code)
-            result      = exec(env_code + solver_code)  # FIXED runtime
-            score       = judge(result.FINAL_ANSWER, task.rubrics)
-            if score < 1: classify_failure(stage, mode)
+            test_code = candidate.compile_tests(task.context, task.query)
+            answer    = candidate.generate_answer(task.context, task.query)
+            results   = run_tests(test_code, answer)         # DETERMINISTIC
+            if any_failed: answer = repair(answer, failed)   # Up to max_retries
+            score     = judge(answer, task.rubrics)           # Rubric evaluation
 
-    fitness = 0.6 * accuracy + 0.2 * exec_rate + 0.2 * compile_rate
+    fitness = 0.55 * accuracy + 0.25 * test_pass_rate + 0.15 * exec_rate + 0.05 * compile_rate
     elites = select_top_k(population, fitness)
     children = meta_architect.mutate(elites, failure_traces)
     population = elites + children
 ```
 
-### Compiler Library (Continuous Learning)
+### Fitness Function Comparison
 
-Successful compilation strategies accumulate in a persistent library indexed by domain and data structure type. Over generations, the system discovers:
-- Physics contexts -> `networkx.Graph` for spatial relationships
-- Legal contexts -> FSMs for procedural rules
-- Factual contexts -> Pydantic models with validators
-- Nuanced contexts -> Oracle-heavy classes
+| Mode | answer_correctness | test_pass_rate | execution_success | compilation_success |
+|------|-------------------|----------------|-------------------|---------------------|
+| CaS | 0.80 | N/A | 0.10 | 0.10 |
+| **TDG** | **0.55** | **0.25** | **0.15** | **0.05** |
+
+TDG's `test_pass_rate` weight provides a dense signal even when accuracy = 0, enabling evolution to find a gradient.
 
 ---
 
@@ -231,47 +234,55 @@ Successful compilation strategies accumulate in a persistent library indexed by 
 | CoT | Legacy | Chain-of-thought with LLM verification |
 | ReAct | Legacy | Evidence extraction + synthesis |
 | Evo-Protocol v1 | Legacy | Evolved perception/cognition/verification |
-| **CaS Seed** | CaS | General-purpose compilation + solver |
-| **CaS Naive** | CaS | Flat key-value dict compilation |
-| **CaS Pydantic** | CaS | Always-Pydantic model compilation |
-| **CaS Evolved** | CaS | Meta-Agent evolved compiler (main result) |
+| CaS Seed | CaS | General-purpose compilation + solver |
+| CaS Evolved | CaS | Meta-Agent evolved compiler |
+| **TDG Seed** | TDG | General-purpose test generation + answer |
+| **TDG Evolved** | TDG | Meta-Agent evolved test compiler (main result) |
 
 ### Metrics
 
 1. **Solving Rate**: Binary (0/1) per task
-2. **Compilation Success Rate**: Fraction producing valid namespaces
-3. **Execution Success Rate**: Fraction where solver executes without error
-4. **Per-Mode Accuracy**: By F1/F2/F3/F4 failure modes
-5. **Attention Drift**: 0-1 parametric override measure
-6. **Oracle Utilization**: Oracles per task, oracle accuracy
+2. **Test Pass Rate**: Fraction of tests passed per task (TDG only)
+3. **Compilation Success Rate**: Fraction of tasks where tests compile (TDG) or sandbox compiles (CaS)
+4. **Execution Success Rate**: Fraction where answer is generated successfully
+5. **Per-Mode Accuracy**: By F1/F2/F3/F4 failure modes
+6. **Attention Drift**: 0-1 parametric override measure
 7. **Token Efficiency**: Solving rate per token
 
-### Fitness Function
+### Ablation Studies
 
-```
-fitness = 0.6 * answer_correctness + 0.2 * execution_success_rate + 0.2 * compilation_success_rate
-```
+| Variant | compile_tests | generate_answer | verify | repair |
+|---------|:---:|:---:|:---:|:---:|
+| TDG Full | Y | Y | Y | Y |
+| No-tests | - | Y | - | - |
+| No-repair | Y | Y | Y | - |
+| No-evolution | Y (seed only) | Y (seed only) | Y | Y |
 
 ---
 
-## 8. Expected Results
+## 8. Hypotheses
 
-### Hypothesis 1: CaS > Text-to-Text
-CaS should outperform Evo-Protocol v1 because:
-- F1 failures caught by runtime assertions, not probabilistic verification
-- F3 failures reduced because reasoning is deterministic Python
-- F4 failures reduced because induction becomes lookup construction
+### H1: TDG > Direct Inference
+TDG's test-verify-repair loop should improve accuracy over direct inference by catching and correcting parametric override and factual errors.
 
-### Hypothesis 2: Emergent Specialization
-After 10+ generations, the Meta-Agent discovers domain-specific strategies:
-- Graphs for spatial, Pydantic for factual, FSMs for temporal
-- Neural Oracles emerge for nuanced/semantic contexts
+### H2: TDG >= CaS on CL-bench
+TDG should match or exceed CaS because:
+- No context truncation (full 150k char access)
+- NL answers preserve persona/tone/style
+- Graceful degradation floor = direct inference (not empty answer)
+- Dense fitness signal enables evolution even when accuracy = 0
 
-### Hypothesis 3: Oracle-Symbol Balance
-The Meta-Agent learns to minimize oracle usage for contexts amenable to symbolic extraction and increase oracle usage for nuanced contexts. This represents learned "perception vs. logic" boundary detection.
+### H3: Test Quality Evolves
+After 10+ generations, the Meta-Agent discovers domain-specific test strategies:
+- Factual contexts -> assertion-heavy tests
+- Semantic contexts -> oracle-heavy tests
+- Format-constrained -> regex/structure tests
 
-### Hypothesis 4: Two-Stage Signal > One-Stage
-The compile/solve failure decomposition enables faster convergence.
+### H4: Dense Signal Enables Evolution
+TDG's test_pass_rate weight (0.25) provides a fitness gradient even when rubric accuracy = 0, enabling evolution to proceed where CaS stalls.
+
+### H5: Repair Loop Has Diminishing Returns
+Most improvements come from the first repair attempt. Additional attempts have diminishing marginal value, suggesting max_retries=2 is sufficient.
 
 ---
 
@@ -279,46 +290,63 @@ The compile/solve failure decomposition enables faster convergence.
 
 ```
 context_learning/
-├── core/
-│   ├── base_protocol.py              # Legacy protocol ABC
-│   ├── base_sandbox_protocol.py      # BaseCaSCompiler: 2-method interface (NEW)
-│   ├── sandbox_executor.py           # Safe execution + Neural Oracle injection (NEW)
-│   ├── protocol_loader.py            # ProtocolLoader + SandboxProtocolLoader
-│   ├── meta_architect.py             # CaS-aware mutation prompts
-│   ├── evolution_loop.py             # Mode-switched evolution engine
-│   ├── failure_classifier.py         # Stage-aware failure analysis
-│   ├── compiler_library.py           # Strategy accumulation (NEW)
-│   ├── archive.py                    # SHA-indexed protocol storage
-│   ├── self_repair.py                # Validation-guided code repair
-│   ├── evaluator.py                  # Benchmark evaluation helpers
-│   ├── token_tracker.py              # Token accounting
-│   └── env_utils.py                  # Environment variable helpers
-├── baselines/
-│   ├── naive.py                      # Legacy: direct call
-│   ├── cot.py                        # Legacy: chain-of-thought
-│   ├── react.py                      # Legacy: evidence extraction
-│   ├── cas_seed.py                   # CaS: general compilation (NEW)
-│   ├── cas_naive.py                  # CaS: flat dict (NEW)
-│   └── cas_pydantic.py              # CaS: Pydantic models (NEW)
-├── benchmarks/
-│   ├── base.py                       # TaskRecord, BaseBenchmark
-│   └── cl_bench.py                   # CL-bench implementation
-├── configs/
-│   └── evolution.yaml                # mode: cas, fitness_weights, etc.
-├── run_evolution.py                  # CLI: --mode cas|legacy
-├── run_baselines.py                  # CLI: CaS baselines registered
-├── eval.py                           # Judge evaluation
-├── infer.py                          # Direct model inference
-└── requirements.txt                  # pydantic, networkx added
++-- core/
+|   +-- base_protocol.py              # Legacy protocol ABC
+|   +-- base_sandbox_protocol.py      # BaseCaSCompiler: 2-method interface
+|   +-- base_tdg_protocol.py          # BaseTDGCompiler: 4-stage pipeline (NEW)
+|   +-- sandbox_executor.py           # Safe execution + Neural Oracle injection
+|   +-- protocol_loader.py            # ProtocolLoader + SandboxProtocolLoader + TDGProtocolLoader
+|   +-- meta_architect.py             # CaS + TDG mutation prompts
+|   +-- evolution_loop.py             # Mode-switched evolution engine (cas/tdg/legacy)
+|   +-- failure_classifier.py         # Stage-aware failure analysis (TDG-aware)
+|   +-- compiler_library.py           # Strategy accumulation
+|   +-- archive.py                    # SHA-indexed protocol storage
+|   +-- self_repair.py                # Validation-guided code repair (TDG-aware)
+|   +-- evaluator.py                  # Benchmark evaluation helpers (TDG-aware)
+|   +-- token_tracker.py              # Token accounting
+|   +-- env_utils.py                  # Environment variable helpers
++-- baselines/
+|   +-- naive.py                      # Legacy: direct call
+|   +-- cot.py                        # Legacy: chain-of-thought
+|   +-- react.py                      # Legacy: evidence extraction
+|   +-- cas_seed.py                   # CaS: general compilation
+|   +-- cas_naive.py                  # CaS: flat dict
+|   +-- cas_pydantic.py               # CaS: Pydantic models
+|   +-- tdg_seed.py                   # TDG: general test generation (NEW)
++-- benchmarks/
+|   +-- base.py                       # TaskRecord, BaseBenchmark
+|   +-- cl_bench.py                   # CL-bench implementation
++-- configs/
+|   +-- evolution.yaml                # mode: cas/tdg, fitness_weights, etc.
++-- run_evolution.py                  # CLI: --mode cas|tdg|legacy
++-- run_baselines.py                  # CLI: CaS + TDG baselines
++-- eval.py                           # Judge evaluation
++-- infer.py                          # Direct model inference
++-- requirements.txt                  # Dependencies
 ```
 
 ---
 
 ## 10. Running Experiments
 
-### Quick Start (CaS mode)
+### TDG Mode (Main Experiment)
 ```bash
-python run_evolution.py --mode cas --generations 5 --population-size 4 --tasks-per-eval 20
+python run_evolution.py --mode tdg --generations 30 --population-size 8 --tasks-per-eval 50
+```
+
+### TDG Smoke Test
+```bash
+python run_evolution.py \
+  --no-config --mode tdg --env-file .env \
+  --data-path data/CL-bench.jsonl --split train \
+  --generations 2 --population-size 2 --elite-count 1 \
+  --tasks-per-eval 3 --skip-final-eval \
+  --output outputs/smoke/tdg_smoke.json
+```
+
+### CaS Mode (Baseline Comparison)
+```bash
+python run_evolution.py --mode cas --generations 30 --population-size 8 --tasks-per-eval 50
 ```
 
 ### Legacy Mode (Evo-Protocol v1)
@@ -326,20 +354,26 @@ python run_evolution.py --mode cas --generations 5 --population-size 4 --tasks-p
 python run_evolution.py --mode legacy --generations 5 --population-size 4 --tasks-per-eval 20
 ```
 
-### CaS Baselines
+### Import Smoke Test
 ```bash
-python run_baselines.py --baseline cas_seed --split test
-python run_baselines.py --baseline cas_naive --split test
-python run_baselines.py --baseline cas_pydantic --split test
+python -c "
+from baselines.tdg_seed import SeedTDGCompiler
+from core.protocol_loader import TDGProtocolLoader
+print('Import OK')
+"
 ```
 
 ---
 
 ## 11. Verification Plan
 
-1. **Smoke test**: `python run_evolution.py --mode cas --generations 1 --population-size 2 --tasks-per-eval 5` -- no crashes
-2. **Compilation test**: Feed 10 diverse contexts to `SeedCaSCompiler.compile_sandbox()` -- verify >80% produce valid code
-3. **Oracle test**: Verify `_oracle(prompt, bool)` returns strictly True/False in sandbox
-4. **End-to-end**: Run 3 generations on 20 tasks -- verify fitness does not degrade
-5. **Comparison**: Run all baselines on test split -- compare solving rates
-6. **Emergence check**: After 10+ generations, inspect compiler templates for emergent structures
+1. **Import test**: Verify all new classes import without errors
+2. **Smoke test**: Run TDG evolution for 2 generations on 3 tasks -- no crashes
+3. **Single-task test**: Run SeedTDGCompiler on 1 task, verify:
+   - compile_tests produces valid Python with def test_* functions
+   - generate_answer produces non-empty NL text
+   - run_tests returns a dict with test results
+   - SandboxResult has correct fields (test_pass_rate, test_results, repair_attempts)
+4. **Graceful degradation**: Verify that when compile_tests fails, generate_answer result is returned as-is
+5. **CaS regression**: Run same CaS smoke test, verify identical behavior
+6. **Comparison**: Run both CaS and TDG on same 5 tasks, compare accuracy and test_pass_rate

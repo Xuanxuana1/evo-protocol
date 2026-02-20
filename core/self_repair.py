@@ -9,7 +9,7 @@ from typing import Optional, Union
 
 from core.base_protocol import BaseProtocol
 from core.env_utils import env_float, env_int
-from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader
 
 
 def extract_python_code(text: str) -> str:
@@ -92,7 +92,7 @@ def generate_with_repair(
     architect_client,
     architect_model: str,
     architect_prompt: str,
-    loader: Union[ProtocolLoader, SandboxProtocolLoader],
+    loader: Union[ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader],
     max_repair_attempts: int = 2,
     request_tag: str = "",
 ) -> tuple[Optional[BaseProtocol], str]:
@@ -124,21 +124,38 @@ def generate_with_repair(
         if attempt >= max_repair_attempts:
             return None, f"Validation failed after {max_repair_attempts + 1} attempts: {error.message}"
 
-        repair_prompt = (
-            "The generated protocol failed validation. Please fix it.\n\n"
-            "Hard constraints:\n"
-            "- Output only executable Python code (no markdown, no prose).\n"
-            "- Include exactly one class inheriting BaseCaSCompiler.\n"
-            "- Keep exact method signatures:\n"
-            "  def compile_sandbox(self, context: str) -> str\n"
-            "  def generate_solver(self, query: str, sandbox_schema: str) -> str\n"
-            "- Do NOT override immutable runtime methods: __init__, run, _call_llm,\n"
-            "  _make_oracle_fn, _sanitize_generated_code, _attempt_syntax_repair,\n"
-            "  _answer_with_oracle_fallback, _derive_dynamic_call_budget.\n\n"
-            f"Feedback:\n{error.to_feedback()}\n\n"
-            f"Current code:\n```python\n{code}\n```\n\n"
-            "Output only corrected Python code."
-        )
+        if isinstance(loader, TDGProtocolLoader):
+            repair_prompt = (
+                "The generated protocol failed validation. Please fix it.\n\n"
+                "Hard constraints:\n"
+                "- Output only executable Python code (no markdown, no prose).\n"
+                "- Include exactly one class inheriting BaseTDGCompiler.\n"
+                "- Keep exact method signatures:\n"
+                "  def compile_tests(self, context: str, query: str) -> str\n"
+                "  def generate_answer(self, context: str, query: str, messages_raw: list = None) -> str\n"
+                "- Do NOT override immutable runtime methods: __init__, run, _call_llm,\n"
+                "  _make_oracle_fn, _sanitize_generated_code, _attempt_syntax_repair,\n"
+                "  _answer_with_oracle_fallback, _derive_dynamic_call_budget.\n\n"
+                f"Feedback:\n{error.to_feedback()}\n\n"
+                f"Current code:\n```python\n{code}\n```\n\n"
+                "Output only corrected Python code."
+            )
+        else:
+            repair_prompt = (
+                "The generated protocol failed validation. Please fix it.\n\n"
+                "Hard constraints:\n"
+                "- Output only executable Python code (no markdown, no prose).\n"
+                "- Include exactly one class inheriting BaseCaSCompiler.\n"
+                "- Keep exact method signatures:\n"
+                "  def compile_sandbox(self, context: str) -> str\n"
+                "  def generate_solver(self, query: str, sandbox_schema: str) -> str\n"
+                "- Do NOT override immutable runtime methods: __init__, run, _call_llm,\n"
+                "  _make_oracle_fn, _sanitize_generated_code, _attempt_syntax_repair,\n"
+                "  _answer_with_oracle_fallback, _derive_dynamic_call_budget.\n\n"
+                f"Feedback:\n{error.to_feedback()}\n\n"
+                f"Current code:\n```python\n{code}\n```\n\n"
+                "Output only corrected Python code."
+            )
         try:
             raw = _call_architect(
                 architect_client,

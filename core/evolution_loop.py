@@ -17,10 +17,11 @@ from benchmarks.base import TaskRecord, get_benchmark
 from core.archive import ProtocolArchive
 from core.base_protocol import BaseProtocol
 from core.base_sandbox_protocol import BaseCaSCompiler, SandboxResult
+from core.base_tdg_protocol import BaseTDGCompiler
 from core.env_utils import env_float, env_int
 from core.failure_classifier import build_failure_feedback
 from core.meta_architect import MetaArchitect, ParentPerformance
-from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader
 
 
 @dataclass
@@ -40,7 +41,7 @@ class EvolutionConfig:
     max_repair_attempts: int = 2
     seed: int = 42
     mode: str = "cas"
-    init_population_size: int = 0
+    init_population_size: int = 1
     sandbox_timeout_seconds: int = 30
     selection_tau: float = 0.5
     selection_alpha: float = 0.5
@@ -58,7 +59,7 @@ class EvolutionEngine:
         self,
         benchmark_name: str,
         data_path: str,
-        protocol_loader: Union[ProtocolLoader, SandboxProtocolLoader],
+        protocol_loader: Union[ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader],
         meta_architect: MetaArchitect,
         archive: ProtocolArchive,
         config: EvolutionConfig | None = None,
@@ -93,6 +94,10 @@ class EvolutionEngine:
     @property
     def _is_cas(self) -> bool:
         return self.config.mode == "cas"
+
+    @property
+    def _is_tdg(self) -> bool:
+        return self.config.mode == "tdg"
 
     def run(self, initial_code: str) -> dict[str, Any]:
         """Run full evolution from an initial protocol source string."""
@@ -193,9 +198,11 @@ class EvolutionEngine:
                     "top_root_causes": eval_summary.get("top_root_causes", [])[:3],
                     "time": self._now_iso(),
                 }
-                if self._is_cas:
+                if self._is_cas or self._is_tdg:
                     candidate_log["compilation_success_rate"] = eval_summary.get("compilation_success_rate", 0.0)
                     candidate_log["execution_success_rate"] = eval_summary.get("execution_success_rate", 0.0)
+                if self._is_tdg:
+                    candidate_log["avg_test_pass_rate"] = eval_summary.get("avg_test_pass_rate", 0.0)
 
                 self._append_jsonl(self.candidate_trace_path, candidate_log)
                 print(
@@ -386,6 +393,7 @@ class EvolutionEngine:
         attention_drift_values: list[float] = []
         compilation_success_count = 0
         execution_success_count = 0
+        test_pass_rate_values: list[float] = []
 
         for task_idx, task in enumerate(sampled, start=1):
             record = TaskRecord(
@@ -425,6 +433,8 @@ class EvolutionEngine:
 
             if self._is_cas:
                 effective_context, effective_query = self._build_cas_inputs(record)
+            elif self._is_tdg:
+                effective_context, effective_query = self._build_tdg_inputs(record)
             else:
                 effective_context = self._build_effective_context(record)
                 effective_query = record.query
@@ -438,19 +448,21 @@ class EvolutionEngine:
                     **task_info,
                 },
             )
-            result = self.loader.run_with_timeout(protocol, context=effective_context, query=effective_query)
+            result = self.loader.run_with_timeout(protocol, context=effective_context, query=effective_query) if not self._is_tdg else self.loader.run_with_timeout(protocol, context=effective_context, query=effective_query, messages_raw=record.messages_raw)
             worker_seconds = perf_counter() - worker_timer
             if result is None:
                 record.model_output = ""
                 record.reasoning_trace = ["execution failed or timed out"]
                 record.verification_passed = False
                 worker_status = "timeout_or_error"
-                if self._is_cas:
+                if self._is_cas or self._is_tdg:
                     record.metadata["compilation_success"] = False
                     record.metadata["execution_success"] = False
                     record.metadata["compilation_failed"] = False
                     record.metadata["execution_output"] = "execution failed or timed out"
                     record.metadata["execution_traceback"] = "execution failed or timed out"
+                    if self._is_tdg:
+                        record.metadata["test_pass_rate"] = 0.0
             else:
                 record.model_output = result.answer
                 record.reasoning_trace = list(result.reasoning_trace)
@@ -459,8 +471,8 @@ class EvolutionEngine:
                 record.metadata.update(result.metadata)
                 worker_status = "ok"
 
-                # CaS-specific: capture sandbox result fields
-                if self._is_cas and isinstance(result, SandboxResult):
+                # CaS/TDG-specific: capture sandbox result fields
+                if (self._is_cas or self._is_tdg) and isinstance(result, SandboxResult):
                     if result.compilation_success:
                         compilation_success_count += 1
                     if result.execution_success:
@@ -476,6 +488,11 @@ class EvolutionEngine:
                         record.metadata.pop("execution_traceback", None)
                     else:
                         record.metadata["execution_traceback"] = execution_output
+                    # TDG-specific: capture test_pass_rate
+                    if self._is_tdg:
+                        tpr = float(result.metadata.get("test_pass_rate", 0.0))
+                        record.metadata["test_pass_rate"] = tpr
+                        test_pass_rate_values.append(tpr)
 
             self._append_jsonl(
                 self.task_trace_path,
@@ -581,8 +598,8 @@ class EvolutionEngine:
                     },
                 }
 
-                # CaS-specific failure fields
-                if self._is_cas:
+                # CaS/TDG-specific failure fields
+                if self._is_cas or self._is_tdg:
                     failure_record["compilation_failed"] = bool(record.metadata.get("compilation_failed", False))
                     failure_record["sandbox_error"] = (
                         str(record.metadata.get("execution_output", ""))[:500]
@@ -591,6 +608,8 @@ class EvolutionEngine:
                     )
                     failure_record["execution_traceback"] = str(record.metadata.get("execution_traceback", ""))[:500]
                     failure_record["sandbox_code_snippet"] = record.metadata.get("sandbox_code", "")[:500]
+                if self._is_tdg:
+                    failure_record["test_pass_rate"] = float(record.metadata.get("test_pass_rate", 0.0))
 
                 failures.append(failure_record)
 
@@ -625,10 +644,19 @@ class EvolutionEngine:
 
         # Compute fitness: weighted multi-objective for CaS, simple accuracy for legacy
         answer_correctness = sum(scores) / len(scores) if scores else 0.0
-        compilation_rate = compilation_success_count / total_tasks if self._is_cas else 1.0
-        execution_rate = execution_success_count / total_tasks if self._is_cas else 1.0
+        compilation_rate = compilation_success_count / total_tasks if (self._is_cas or self._is_tdg) else 1.0
+        execution_rate = execution_success_count / total_tasks if (self._is_cas or self._is_tdg) else 1.0
+        avg_test_pass_rate = mean(test_pass_rate_values) if test_pass_rate_values else 0.0
 
-        if self._is_cas:
+        if self._is_tdg:
+            w = self.config.fitness_weights
+            fitness = (
+                w.get("answer_correctness", 0.55) * answer_correctness
+                + w.get("test_pass_rate", 0.25) * avg_test_pass_rate
+                + w.get("execution_success", 0.15) * execution_rate
+                + w.get("compilation_success", 0.05) * compilation_rate
+            )
+        elif self._is_cas:
             w = self.config.fitness_weights
             fitness = (
                 w.get("answer_correctness", 0.6) * answer_correctness
@@ -647,7 +675,9 @@ class EvolutionEngine:
             attention_drift_values=attention_drift_values,
             compilation_success_count=compilation_success_count,
             execution_success_count=execution_success_count,
-            is_cas=self._is_cas,
+            is_cas=self._is_cas or self._is_tdg,
+            is_tdg=self._is_tdg,
+            test_pass_rate_values=test_pass_rate_values,
         )
         return fitness, mode_acc, failures, eval_summary
 
@@ -702,6 +732,36 @@ class EvolutionEngine:
         return context_payload, query_payload
 
     @staticmethod
+    def _build_tdg_inputs(record: TaskRecord) -> tuple[str, str]:
+        """Build TDG context/query payloads preserving full context without CaS framing."""
+
+        normalized_messages = [
+            {
+                "role": str(message.get("role", "")),
+                "content": str(message.get("content", "")),
+            }
+            for message in record.messages_raw
+        ]
+        messages_json = json.dumps(normalized_messages, ensure_ascii=False)
+        base_context = str(record.context or "")
+        context_sections = [
+            "RAW_MESSAGES_JSON (role-preserving):\n"
+            f"{messages_json}",
+        ]
+        if base_context and not EvolutionEngine._context_covered_by_messages(base_context, normalized_messages):
+            context_sections.append(
+                "SYSTEM_CONTEXT_EXTRACT:\n"
+                f"{base_context}"
+            )
+        context_payload = "\n\n".join(context_sections)
+        query_payload = (
+            "LAST_USER_QUERY:\n"
+            f"{str(record.query or '')}\n\n"
+            "Use all constraints from the conversation when producing your answer."
+        )
+        return context_payload, query_payload
+
+    @staticmethod
     def _context_covered_by_messages(base_context: str, messages: list[dict[str, str]]) -> bool:
         compact_context = re.sub(r"\s+", " ", str(base_context or "")).strip()
         if not compact_context:
@@ -748,21 +808,23 @@ class EvolutionEngine:
         """Accuracy-first score used for ranking/parent selection."""
 
         accuracy = float(eval_summary.get("accuracy", 0.0))
-        if not self._is_cas:
+        if not self._is_cas and not self._is_tdg:
             return accuracy + 1e-3 * float(fitness)
 
         execution_rate = float(eval_summary.get("execution_success_rate", 0.0))
         compilation_rate = float(eval_summary.get("compilation_success_rate", 0.0))
+        test_pass_rate = float(eval_summary.get("avg_test_pass_rate", 0.0))
         # Lexicographic preference: accuracy dominates, runtime metrics break ties.
         return (
             accuracy
             + 1e-3 * float(fitness)
             + 1e-4 * execution_rate
             + 1e-5 * compilation_rate
+            + 1e-6 * test_pass_rate
         )
 
     @staticmethod
-    def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, float, float, float]:
+    def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
         """Sort key that prioritizes answer accuracy over proxy runtime metrics."""
 
         summary = item.get("eval_summary", {})
@@ -772,7 +834,8 @@ class EvolutionEngine:
         fitness = float(item.get("fitness", 0.0))
         execution_rate = float(summary.get("execution_success_rate", 1.0))
         compilation_rate = float(summary.get("compilation_success_rate", 1.0))
-        return (accuracy, fitness, execution_rate, compilation_rate)
+        test_pass_rate = float(summary.get("avg_test_pass_rate", 0.0))
+        return (accuracy, fitness, execution_rate, compilation_rate, test_pass_rate)
 
     def _build_failure_feedback(self, record: TaskRecord) -> dict[str, Any]:
         """Create structured failure analysis for mutation feedback."""
@@ -948,6 +1011,8 @@ class EvolutionEngine:
         compilation_success_count: int = 0,
         execution_success_count: int = 0,
         is_cas: bool = False,
+        is_tdg: bool = False,
+        test_pass_rate_values: list[float] | None = None,
     ) -> dict[str, Any]:
         """Build compact, generation-level failure summary for archive metadata."""
 
@@ -1040,6 +1105,10 @@ class EvolutionEngine:
             summary["top_compilation_errors"] = [e for e, _ in top_compilation_errors.most_common(5)]
             summary["top_execution_errors"] = [e for e, _ in top_execution_errors.most_common(5)]
 
+        if is_tdg and test_pass_rate_values is not None:
+            avg_tpr = (sum(test_pass_rate_values) / len(test_pass_rate_values)) if test_pass_rate_values else 0.0
+            summary["avg_test_pass_rate"] = float(avg_tpr)
+
         return summary
 
     @staticmethod
@@ -1107,8 +1176,10 @@ class EvolutionEngine:
                 "repair_actions": feedback.get("repair_actions", [])[:3] if isinstance(feedback, dict) else [],
                 "time": self._now_iso(),
             }
-            if self._is_cas:
+            if self._is_cas or self._is_tdg:
                 record["compilation_failed"] = item.get("compilation_failed", False)
                 record["sandbox_error"] = str(item.get("sandbox_error", ""))[:200]
                 record["execution_traceback"] = str(item.get("execution_traceback", ""))[:200]
+            if self._is_tdg:
+                record["test_pass_rate"] = float(item.get("test_pass_rate", 0.0))
             self._append_jsonl(self.failure_trace_path, record)

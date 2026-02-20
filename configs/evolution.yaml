@@ -27,6 +27,11 @@ evolution:
     answer_correctness: 0.8
     execution_success: 0.1
     compilation_success: 0.1
+  tdg_fitness_weights:
+    answer_correctness: 0.55
+    test_pass_rate: 0.25
+    execution_success: 0.15
+    compilation_success: 0.05
   sandbox_allowed_imports:
     - pydantic
     - networkx

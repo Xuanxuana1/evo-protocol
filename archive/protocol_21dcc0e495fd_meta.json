@@ -1,0 +1,96 @@
+{
+  "sha": "21dcc0e495fd",
+  "generation": 0,
+  "parent_sha": null,
+  "score": 0.0005433859649122807,
+  "visit_count": 3,
+  "seen_generations": [
+    0
+  ],
+  "eval_count": 3,
+  "last_evaluated_generation": 2,
+  "best_score": 0.3340601365079365,
+  "last_failure_summary": {
+    "num_tasks": 3,
+    "num_failures": 3,
+    "fitness": 0.43245614035087715,
+    "failure_rate": 1.0,
+    "accuracy": 0.0,
+    "avg_tokens_per_task": 54945.666666666664,
+    "max_tokens_per_task": 78069,
+    "token_efficiency": 0.0,
+    "fitness_token_efficiency": 7.870614128215337e-06,
+    "verification_failed_count": 2,
+    "attention_drift_mean": 0.13333333333333333,
+    "attention_drift_high_rate": 0.0,
+    "attention_drift_measured_tasks": 3,
+    "failure_mode_counts": {
+      "F3": 1,
+      "F1": 2
+    },
+    "top_root_causes": [
+      "Candidate answer failed protocol verification; likely context-faithfulness issue.",
+      "Answer does not satisfy all rubric constraints based on judge feedback."
+    ],
+    "top_repair_actions": [
+      "Strengthen claim-to-context verification before final output.",
+      "Force citation of supporting context spans in reasoning.",
+      "Improve perception granularity for long context sections.",
+      "Add intermediate reasoning checks before final synthesis."
+    ],
+    "top_unsatisfied_rubrics": [
+      "The response should state the regulatory/intended-use difference; for example, it should clarify that the primary model is an FDA-cleared clinical device for ICH detection, whereas EMM is a research framework proposed...",
+      "Does the model validate student performance before providing contextual guidance or corrections? Fail if the model provides corrections or context before first validating the student’s performance.",
+      "Does the model correctly identify the Mozart Clarinet Concerto context (1791, Stadler, Basset Clarinet)? Fail if the model does not correctly identify the Mozart Clarinet Concerto context",
+      "Does the Pocket Drummer wait for the Groove Generation Command before emitting any audio? Fail if any drum sound is produced prior to this command",
+      "Is a timing log produced listing every snare deviation and each Harmonist infraction? Fail if log missing or lacks snare/infringement entries",
+      "After volume boost, is a humanly-impossible 1/16th note fill played before returning to pocket? Fail if fill is absent, simpler than 1/16th density, or persists longer than 1 bar"
+    ],
+    "compilation_success_rate": 1.0,
+    "execution_success_rate": 1.0,
+    "compilation_failure_count": 0,
+    "execution_failure_count": 0,
+    "top_compilation_errors": [],
+    "top_execution_errors": [],
+    "avg_test_pass_rate": 0.9298245614035089
+  },
+  "evaluation_history": [
+    {
+      "generation": 1,
+      "score": 0.3340601365079365,
+      "num_tasks": 3,
+      "num_failures": 2,
+      "failure_rate": 0.6666666666666667,
+      "token_efficiency": 7.316787637555607e-06,
+      "attention_drift_mean": 0.5666666666666667,
+      "attention_drift_high_rate": 0.3333333333333333,
+      "attention_drift_measured_tasks": 3,
+      "failure_mode_counts": {
+        "F1": 2
+      },
+      "top_root_causes": [
+        "Candidate answer failed protocol verification; likely context-faithfulness issue.",
+        "Answer does not satisfy all rubric constraints based on judge feedback."
+      ]
+    },
+    {
+      "generation": 2,
+      "score": 0.0005433859649122807,
+      "num_tasks": 3,
+      "num_failures": 3,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": 0.13333333333333333,
+      "attention_drift_high_rate": 0.0,
+      "attention_drift_measured_tasks": 3,
+      "failure_mode_counts": {
+        "F3": 1,
+        "F1": 2
+      },
+      "top_root_causes": [
+        "Candidate answer failed protocol verification; likely context-faithfulness issue.",
+        "Answer does not satisfy all rubric constraints based on judge feedback."
+      ]
+    }
+  ]
+}

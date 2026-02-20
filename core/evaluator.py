@@ -13,7 +13,8 @@ from tqdm import tqdm
 from benchmarks.base import TaskRecord, get_benchmark
 from core.base_protocol import BaseProtocol
 from core.base_sandbox_protocol import BaseCaSCompiler
-from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
+from core.base_tdg_protocol import BaseTDGCompiler
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader
 
 
 def _build_effective_context(record: TaskRecord) -> str:
@@ -66,6 +67,36 @@ def _build_cas_inputs(record: TaskRecord) -> tuple[str, str]:
     return context_payload, query_payload
 
 
+def _build_tdg_inputs(record: TaskRecord) -> tuple[str, str]:
+    """Build TDG context/query payloads preserving full context without CaS framing."""
+
+    normalized_messages = [
+        {
+            "role": str(message.get("role", "")),
+            "content": str(message.get("content", "")),
+        }
+        for message in record.messages_raw
+    ]
+    messages_json = json.dumps(normalized_messages, ensure_ascii=False)
+    base_context = str(record.context or "")
+    context_sections = [
+        "RAW_MESSAGES_JSON (role-preserving):\n"
+        f"{messages_json}",
+    ]
+    if base_context and not _context_covered_by_messages(base_context, normalized_messages):
+        context_sections.append(
+            "SYSTEM_CONTEXT_EXTRACT:\n"
+            f"{base_context}"
+        )
+    context_payload = "\n\n".join(context_sections)
+    query_payload = (
+        "LAST_USER_QUERY:\n"
+        f"{str(record.query or '')}\n\n"
+        "Use all constraints from the conversation when producing your answer."
+    )
+    return context_payload, query_payload
+
+
 def _context_covered_by_messages(base_context: str, messages: list[dict[str, str]]) -> bool:
     compact_context = re.sub(r"\s+", " ", str(base_context or "")).strip()
     if not compact_context:
@@ -96,13 +127,13 @@ def _clone_protocol(protocol: Any) -> Any:
 
 
 def run_protocol_on_benchmark(
-    protocol: BaseProtocol | BaseCaSCompiler,
+    protocol: BaseProtocol | BaseCaSCompiler | BaseTDGCompiler,
     benchmark_name: str,
     data_path: str,
     split: str = "test",
     output_path: Optional[str] = None,
     benchmark_kwargs: Optional[dict] = None,
-    protocol_loader: Optional[ProtocolLoader | SandboxProtocolLoader] = None,
+    protocol_loader: Optional[ProtocolLoader | SandboxProtocolLoader | TDGProtocolLoader] = None,
     judge_client=None,
     workers: int = 1,
 ) -> list[TaskRecord]:
@@ -111,7 +142,9 @@ def run_protocol_on_benchmark(
     benchmark = get_benchmark(benchmark_name, **(benchmark_kwargs or {}))
     tasks = benchmark.load_tasks(data_path=data_path, split=split)
     if protocol_loader is None:
-        if isinstance(protocol, BaseCaSCompiler):
+        if isinstance(protocol, BaseTDGCompiler):
+            loader = TDGProtocolLoader(protocol.llm, protocol.model)
+        elif isinstance(protocol, BaseCaSCompiler):
             loader = SandboxProtocolLoader(protocol.llm, protocol.model)
         else:
             loader = ProtocolLoader(protocol.llm, protocol.model)
@@ -120,12 +153,17 @@ def run_protocol_on_benchmark(
 
     def process(record: TaskRecord) -> TaskRecord:
         local_protocol = protocol if workers == 1 else _clone_protocol(protocol)
-        if isinstance(local_protocol, BaseCaSCompiler):
+        if isinstance(local_protocol, BaseTDGCompiler):
+            context, query = _build_tdg_inputs(record)
+        elif isinstance(local_protocol, BaseCaSCompiler):
             context, query = _build_cas_inputs(record)
         else:
             context = _build_effective_context(record)
             query = record.query
-        result = loader.run_with_timeout(local_protocol, context=context, query=query)
+        if isinstance(local_protocol, BaseTDGCompiler) and isinstance(loader, TDGProtocolLoader):
+            result = loader.run_with_timeout(local_protocol, context=context, query=query, messages_raw=record.messages_raw)
+        else:
+            result = loader.run_with_timeout(local_protocol, context=context, query=query)
 
         if result is None:
             record.model_output = ""

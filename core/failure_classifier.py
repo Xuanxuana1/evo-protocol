@@ -368,6 +368,19 @@ def build_failure_feedback(
             "- execute: runtime error in query code (type errors, missing data)\n"
         )
 
+    tdg_context = ""
+    if metadata and "test_pass_rate" in metadata:
+        tdg_context = (
+            "\n\nTDG (Test-Driven Generation) context:\n"
+            f"- Test pass rate: {metadata.get('test_pass_rate', 0.0)}\n"
+            f"- Tests compiled: {metadata.get('tests_compiled', False)}\n"
+            f"- Repair attempts: {metadata.get('repair_attempts', 0)}\n"
+            "When test_pass_rate < 1.0, consider whether:\n"
+            "- Tests are too strict (rejecting valid answers)\n"
+            "- Answer generation missed key context facts\n"
+            "- Repair loop failed to fix the identified issues\n"
+        )
+
     prompt = (
         "You are a failure-analysis model for context-learning protocols.\n"
         "Classify the failure into one mode: F1/F2/F3/F4.\n"
@@ -385,6 +398,7 @@ def build_failure_feedback(
         f"Judge rationale:\n{judge_rationale}\n\n"
         f"Default mode hint: {default_mode}\n"
         f"{cas_context}"
+        f"{tdg_context}"
     )
 
     try:

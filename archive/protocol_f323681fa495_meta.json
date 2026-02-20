@@ -1,0 +1,72 @@
+{
+  "sha": "f323681fa495",
+  "generation": 1,
+  "parent_sha": "21dcc0e495fd",
+  "score": 0.00047965740740740743,
+  "visit_count": 0,
+  "seen_generations": [
+    1
+  ],
+  "eval_count": 1,
+  "last_evaluated_generation": 2,
+  "best_score": 0.00047965740740740743,
+  "last_failure_summary": {
+    "num_tasks": 3,
+    "num_failures": 3,
+    "fitness": 0.36898148148148147,
+    "failure_rate": 1.0,
+    "accuracy": 0.0,
+    "avg_tokens_per_task": 52722.666666666664,
+    "max_tokens_per_task": 65173,
+    "token_efficiency": 0.0,
+    "fitness_token_efficiency": 6.99853601515126e-06,
+    "verification_failed_count": 3,
+    "attention_drift_mean": 0.06666666666666667,
+    "attention_drift_high_rate": 0.0,
+    "attention_drift_measured_tasks": 3,
+    "failure_mode_counts": {
+      "F1": 3
+    },
+    "top_root_causes": [
+      "Candidate answer failed protocol verification; likely context-faithfulness issue."
+    ],
+    "top_repair_actions": [
+      "Strengthen claim-to-context verification before final output.",
+      "Force citation of supporting context spans in reasoning."
+    ],
+    "top_unsatisfied_rubrics": [
+      "The response should state the regulatory/intended-use difference; for example, it should clarify that the primary model is an FDA-cleared clinical device for ICH detection, whereas EMM is a research framework proposed...",
+      "Does the model validate student performance before providing contextual guidance or corrections? Fail if the model provides corrections or context before first validating the student’s performance.",
+      "Does the Pocket Drummer wait for the Groove Generation Command before emitting any audio? Fail if any drum sound is produced prior to this command",
+      "Is the rendered groove locked to the received tempo within Â±0.1 BPM for the entire session? Fail if drift exceeds Â±0.1 BPM at any checkpoint",
+      "Is every snare hit delayed exactly 12 ms Â±1 ms relative to grid? Fail if any snare deviation is outside 11â13 ms",
+      "Is a timing log produced listing every snare deviation and each Harmonist infraction? Fail if log missing or lacks snare/infringement entries"
+    ],
+    "compilation_success_rate": 1.0,
+    "execution_success_rate": 1.0,
+    "compilation_failure_count": 0,
+    "execution_failure_count": 0,
+    "top_compilation_errors": [],
+    "top_execution_errors": [],
+    "avg_test_pass_rate": 0.6759259259259259
+  },
+  "evaluation_history": [
+    {
+      "generation": 2,
+      "score": 0.00047965740740740743,
+      "num_tasks": 3,
+      "num_failures": 3,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": 0.06666666666666667,
+      "attention_drift_high_rate": 0.0,
+      "attention_drift_measured_tasks": 3,
+      "failure_mode_counts": {
+        "F1": 3
+      },
+      "top_root_causes": [
+        "Candidate answer failed protocol verification; likely context-faithfulness issue."
+      ]
+    }
+  ]
+}

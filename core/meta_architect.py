@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Union
 
 from core.base_protocol import BaseProtocol
-from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader
 from core.self_repair import generate_with_repair
 
 
@@ -44,11 +44,13 @@ class MetaArchitect:
 
         if self.mode == "cas":
             return self._build_cas_prompt(generation, mutation_attempt, parent_code, parent_performance, failure_examples)
+        if self.mode == "tdg":
+            return self._build_tdg_prompt(generation, mutation_attempt, parent_code, parent_performance, failure_examples)
         return self._build_legacy_prompt(generation, mutation_attempt, parent_code, parent_performance, failure_examples)
 
     def mutate(
         self,
-        loader: Union[ProtocolLoader, SandboxProtocolLoader],
+        loader: Union[ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader],
         generation: int,
         mutation_attempt: int,
         parent_code: str,
@@ -227,6 +229,148 @@ class MetaArchitect:
         ).strip()
 
     # ------------------------------------------------------------------
+    # TDG prompt (Test-Driven Generation)
+    # ------------------------------------------------------------------
+
+    def _build_tdg_prompt(
+        self,
+        generation: int,
+        mutation_attempt: int,
+        parent_code: str,
+        parent_performance: ParentPerformance,
+        failure_examples: list[dict[str, Any]],
+    ) -> str:
+        failures_text = self._format_failures(failure_examples)
+
+        return textwrap.dedent(
+            f"""
+            You are an expert AI systems architect designing TDG (Test-Driven Generation) compilers.
+
+            PARADIGM: Test-Driven Generation (TDG) with 2-Method Co-Evolution
+            TDG generates test functions from context+query, then generates an NL answer,
+            verifies the answer against the tests, and repairs if tests fail.
+            The verification is DETERMINISTIC -- the Python interpreter runs the tests.
+
+            Pipeline (FIXED runtime -- you do NOT write this):
+              test_code = compiler.compile_tests(context, query)   # Phase 1: Test Generation
+              answer    = compiler.generate_answer(context, query)  # Phase 2: Answer Generation
+              results   = run_tests(test_code, answer)              # DETERMINISTIC verification
+              if any failed: answer = repair(answer, failed_tests)  # Phase 3: Repair
+
+            Key property: if compile_tests fails, the system degrades to direct inference
+            (generate_answer only), so TDG is NEVER worse than baseline.
+
+            YOUR TASK: Create one class inheriting from BaseTDGCompiler.
+
+            Required methods (ONLY these two):
+
+            1) compile_tests(self, context: str, query: str) -> str
+               - Use self._call_llm() to ask the LLM to generate Python test functions
+               - Each test function must:
+                 * Be named with test_ prefix
+                 * Accept a single 'answer' parameter (str)
+                 * Use assert statements or raise exceptions on failure
+               - Test categories:
+                 * Factual asserts: key facts from context in answer
+                 * Format checks: required structure/format
+                 * Keyword checks: critical terms present
+                 * Semantic/tone checks via _oracle(prompt, bool)
+                 * Anti-parametric-override: assert context-specific facts that
+                   contradict common knowledge (e.g., assert 'green' in answer
+                   when context says sky is green)
+                 * Constraint checks: length, persona, style requirements
+               - Return the generated code as a string
+
+            2) generate_answer(self, context: str, query: str, messages_raw: list = None) -> str
+               - Use self._call_llm() to generate a natural language answer
+               - If messages_raw is provided, reconstruct structured messages
+               - No truncation of context -- use full text (key advantage over CaS)
+               - Return the answer string
+
+            IMPORTANT: Do NOT implement run() or any execution logic.
+            The runtime is fixed infrastructure that you cannot modify.
+
+            Neural Oracles in tests:
+            Test code may call _oracle(prompt, return_type) for semantic checks:
+              _oracle(prompt, bool)   -> strictly True/False
+              _oracle(prompt, str)    -> brief text
+            Example: assert _oracle(f'Does this answer use a formal tone? {{answer}}', bool)
+
+            Test design guidance:
+            - Factual tests: Extract key facts from context, assert presence in answer
+            - Format tests: Check required headers, bullet points, paragraph structure
+            - Semantic tests: Use _oracle for tone, style, persona compliance
+            - Constraint tests: Word count, language, specific exclusions
+            - Anti-override tests: Assert context-contradicting facts are preserved
+
+            Constraints:
+            1) Import from core.base_tdg_protocol: BaseTDGCompiler
+            1.1) Generate exactly ONE class inheriting BaseTDGCompiler.
+            1.2) Keep method signatures exact:
+                 - def compile_tests(self, context: str, query: str) -> str
+                 - def generate_answer(self, context: str, query: str, messages_raw: list = None) -> str
+            2) Use only allowed libraries (re, json, math, collections, itertools,
+               functools, typing, dataclasses, copy, random, statistics, string,
+               operator, abc, enum, datetime, pydantic, networkx).
+            3) No file I/O, no external APIs, no network calls.
+            4) Keep total LLM calls within 20 per task.
+            5) Do NOT use while-loops. Use bounded for-loops.
+            6) Never define, assign, or override `_oracle`; runtime injects it.
+            7) Never use `raise NotImplementedError(...)` placeholders.
+            8) Do NOT truncate context aggressively; use full text when possible.
+            9) Return only executable Python code.
+            10) NEVER override immutable runtime methods from BaseTDGCompiler:
+                __init__, run, _call_llm, _make_oracle_fn, _sanitize_generated_code,
+                _attempt_syntax_repair, _answer_with_oracle_fallback,
+                _derive_dynamic_call_budget.
+            11) Output MUST include exactly one top-level subclass of BaseTDGCompiler.
+                If unsure, follow this structure:
+                from core.base_tdg_protocol import BaseTDGCompiler
+                class EvoTDGCompiler(BaseTDGCompiler):
+                    def compile_tests(self, context: str, query: str) -> str: ...
+                    def generate_answer(self, context: str, query: str, messages_raw: list = None) -> str: ...
+
+            Current generation: {generation}
+            Mutation attempt id: {mutation_attempt}
+
+            Parent performance:
+            - Overall accuracy: {parent_performance.overall:.1%}
+            - Compilation success rate: {parent_performance.compilation_success_rate:.1%}
+            - Execution success rate: {parent_performance.execution_success_rate:.1%}
+            - F1 (Parametric Override): {parent_performance.f1:.1%}
+            - F2 (Context Navigation): {parent_performance.f2:.1%}
+            - F3 (Reasoning Breakdown): {parent_performance.f3:.1%}
+            - F4 (Induction Failure): {parent_performance.f4:.1%}
+
+            Parent compiler:
+            ```python
+            {parent_code}
+            ```
+
+            Failure examples:
+            {failures_text}
+
+            Improvement strategy:
+            - Low test_pass_rate: Write more targeted tests that catch actual errors.
+              Avoid overly strict tests that reject valid answers.
+            - F1 (Parametric Override): Add anti-override tests that assert
+              context-specific facts contradicting common knowledge.
+            - F2 (Context Navigation): Write tests checking that key evidence
+              from context appears in the answer.
+            - F3 (Reasoning Breakdown): Add tests for intermediate reasoning
+              steps and logical consistency.
+            - F4 (Induction Failure): Write tests checking pattern application
+              from given examples.
+            - Low accuracy despite high test_pass_rate: Tests are too permissive.
+              Add stricter factual and semantic tests.
+            - Compile failures: Simplify test code, use basic assert statements,
+              avoid complex test frameworks.
+
+            Output only complete Python code.
+            """
+        ).strip()
+
+    # ------------------------------------------------------------------
     # Legacy prompt (original Evo-Protocol)
     # ------------------------------------------------------------------
 
@@ -323,6 +467,12 @@ class MetaArchitect:
                     cas_parts.append(f"exec_traceback={str(execution_traceback)[:200]}")
                 cas_info = "\n                    cas_info: " + " | ".join(cas_parts)
 
+            # TDG-specific failure fields
+            tdg_info = ""
+            test_pass_rate = item.get("test_pass_rate", None)
+            if test_pass_rate is not None:
+                tdg_info = f"\n                    test_pass_rate: {test_pass_rate:.2f}"
+
             sandbox_code_snippet = str(item.get("sandbox_code_snippet", ""))[:200]
             snippet_line = ""
             if sandbox_code_snippet:
@@ -342,7 +492,7 @@ class MetaArchitect:
                     root_cause: {root_cause[:260]}
                     classifier: source={source} confidence={confidence}
                     unsatisfied_rubrics: {unsatisfied_text}
-                    repair_actions: {actions_text}{task_type_line}{cas_info}{snippet_line}
+                    repair_actions: {actions_text}{task_type_line}{cas_info}{tdg_info}{snippet_line}
                     """
                 ).strip()
             )

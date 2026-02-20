@@ -13,13 +13,14 @@ from openai import OpenAI
 
 from baselines.naive import NaiveProtocol
 from baselines.cas_seed import SeedCaSCompiler
+from baselines.tdg_seed import SeedTDGCompiler
 from benchmarks import get_benchmark
 from core.archive import ProtocolArchive
 from core.env_utils import env_float, first_env, load_env_file
 from core.evaluator import run_protocol_on_benchmark
 from core.evolution_loop import EvolutionConfig, EvolutionEngine
 from core.meta_architect import MetaArchitect
-from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader
 
 
 def load_initial_code(path: str | None, mode: str = "cas") -> str:
@@ -28,6 +29,9 @@ def load_initial_code(path: str | None, mode: str = "cas") -> str:
 
     if mode == "cas":
         return inspect.getsource(SeedCaSCompiler)
+
+    if mode == "tdg":
+        return inspect.getsource(SeedTDGCompiler)
 
     return inspect.getsource(NaiveProtocol)
 
@@ -74,7 +78,7 @@ def main() -> None:
         action="store_true",
         help="Ignore config file and use only CLI args + env vars",
     )
-    parser.add_argument("--mode", default="cas", choices=["cas", "legacy"], help="Evolution mode: cas (Context-as-Sandbox) or legacy")
+    parser.add_argument("--mode", default="cas", choices=["cas", "legacy", "tdg"], help="Evolution mode: cas (Context-as-Sandbox), tdg (Test-Driven Generation), or legacy")
     parser.add_argument("--benchmark", default="cl-bench", help="Benchmark registry key")
     parser.add_argument("--data-path", default="data/CL-bench.jsonl", help="Benchmark dataset path")
     parser.add_argument("--split", default="train", choices=["train", "val", "test", "all"], help="Data split")
@@ -92,8 +96,8 @@ def main() -> None:
     parser.add_argument(
         "--init-population-size",
         type=int,
-        default=0,
-        help="Initial population size at Gen1 (0 means use --population-size)",
+        default=1,
+        help="Initial population size at Gen1 (1=tree-like growth from seed; 0 means use --population-size)",
     )
     parser.add_argument("--elite-count", type=int, default=2)
     parser.add_argument("--tasks-per-eval", type=int, default=20)
@@ -141,7 +145,7 @@ def main() -> None:
     load_env_file(args.env_file)
 
     mode = str(resolve_cli_or_config("mode", evolution_cfg.get("mode")))
-    if mode not in ("cas", "legacy"):
+    if mode not in ("cas", "legacy", "tdg"):
         mode = "cas"
 
     benchmark_name = str(resolve_cli_or_config("benchmark", benchmark_cfg.get("name")))
@@ -232,15 +236,26 @@ def main() -> None:
     if not disable_attention_flag_provided:
         disable_attention_drift = not bool(evaluation_cfg.get("enable_attention_drift", True))
 
-    # Fitness weights for CaS mode
-    fitness_weights_cfg = evolution_cfg.get("fitness_weights", {})
-    if not isinstance(fitness_weights_cfg, dict):
-        fitness_weights_cfg = {}
-    fitness_weights = {
-        "answer_correctness": float(fitness_weights_cfg.get("answer_correctness", 0.8)),
-        "execution_success": float(fitness_weights_cfg.get("execution_success", 0.1)),
-        "compilation_success": float(fitness_weights_cfg.get("compilation_success", 0.1)),
-    }
+    # Fitness weights — use mode-specific config section, falling back to defaults
+    cas_weights_cfg = evolution_cfg.get("fitness_weights", {})
+    if not isinstance(cas_weights_cfg, dict):
+        cas_weights_cfg = {}
+    tdg_weights_cfg = evolution_cfg.get("tdg_fitness_weights", {})
+    if not isinstance(tdg_weights_cfg, dict):
+        tdg_weights_cfg = {}
+    if mode == "tdg":
+        fitness_weights = {
+            "answer_correctness": float(tdg_weights_cfg.get("answer_correctness", 0.55)),
+            "test_pass_rate": float(tdg_weights_cfg.get("test_pass_rate", 0.25)),
+            "execution_success": float(tdg_weights_cfg.get("execution_success", 0.15)),
+            "compilation_success": float(tdg_weights_cfg.get("compilation_success", 0.05)),
+        }
+    else:
+        fitness_weights = {
+            "answer_correctness": float(cas_weights_cfg.get("answer_correctness", 0.8)),
+            "execution_success": float(cas_weights_cfg.get("execution_success", 0.1)),
+            "compilation_success": float(cas_weights_cfg.get("compilation_success", 0.1)),
+        }
 
     base_url = args.base_url or first_env(["OPENAI_BASE_URL", "BASE_URL", "OPENAI_API_BASE"])
     api_key = args.api_key or first_env(["OPENAI_API_KEY", "API_KEY"])
@@ -279,9 +294,17 @@ def main() -> None:
         if parsed_split_ratio:
             benchmark_kwargs["split_ratio"] = parsed_split_ratio
 
-    # Use SandboxProtocolLoader for CaS mode, ProtocolLoader for legacy
+    # Use appropriate loader for each mode
     if mode == "cas":
         loader = SandboxProtocolLoader(
+            worker_client,
+            worker_model,
+            timeout_seconds=protocol_timeout,
+            sandbox_timeout_seconds=sandbox_timeout,
+            max_llm_calls_per_task=max_llm_calls_per_task,
+        )
+    elif mode == "tdg":
+        loader = TDGProtocolLoader(
             worker_client,
             worker_model,
             timeout_seconds=protocol_timeout,
