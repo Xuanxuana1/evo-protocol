@@ -13,19 +13,20 @@ evolution:
   mode: cas
   generations: 30
   population_size: 8
+  init_population_size: 0
   elite_count: 3
   tasks_per_evaluation: 50
   failure_samples_per_mutation: 5
   enable_failure_classifier: true
   failure_classifier_model: Pro/MiniMaxAI/MiniMax-M2.5
   max_repair_attempts: 2
-  max_llm_calls_per_task: 10
+  max_llm_calls_per_task: 20
   timeout_seconds: 300
   sandbox_timeout_seconds: 30
   fitness_weights:
-    answer_correctness: 0.6
-    execution_success: 0.2
-    compilation_success: 0.2
+    answer_correctness: 0.8
+    execution_success: 0.1
+    compilation_success: 0.1
   sandbox_allowed_imports:
     - pydantic
     - networkx

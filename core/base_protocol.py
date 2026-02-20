@@ -38,7 +38,7 @@ class BaseProtocol(ABC):
         )
         self.max_completion_tokens = env_int(
             ["WORKER_MAX_TOKENS", "EVO_WORKER_MAX_TOKENS", "OPENAI_MAX_TOKENS", "MAX_TOKENS"],
-            default=65536,
+            default=8192,
         )
 
     @abstractmethod

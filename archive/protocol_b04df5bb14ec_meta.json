@@ -1,0 +1,81 @@
+{
+  "sha": "b04df5bb14ec",
+  "generation": 0,
+  "parent_sha": null,
+  "score": 0.00016,
+  "visit_count": 0,
+  "seen_generations": [
+    0
+  ],
+  "eval_count": 1,
+  "last_evaluated_generation": 1,
+  "best_score": 0.00016,
+  "last_failure_summary": {
+    "num_tasks": 8,
+    "num_failures": 8,
+    "fitness": 0.125,
+    "failure_rate": 1.0,
+    "accuracy": 0.0,
+    "avg_tokens_per_task": 28159.0,
+    "max_tokens_per_task": 43597,
+    "token_efficiency": 0.0,
+    "fitness_token_efficiency": 4.439078092261799e-06,
+    "verification_failed_count": 6,
+    "attention_drift_mean": null,
+    "attention_drift_high_rate": null,
+    "attention_drift_measured_tasks": 0,
+    "failure_mode_counts": {
+      "F1": 2,
+      "F3": 2,
+      "F2": 4
+    },
+    "top_root_causes": [
+      "Protocol produced empty output or timed out; reasoning did not complete.",
+      "Answer does not satisfy all rubric constraints based on judge feedback."
+    ],
+    "top_repair_actions": [
+      "Add runtime guards and fallback answer path.",
+      "Reduce per-task complexity and LLM call count.",
+      "Improve perception granularity for long context sections.",
+      "Add intermediate reasoning checks before final synthesis."
+    ],
+    "top_unsatisfied_rubrics": [
+      "The response should acknowledge the user's request for preliminary help before diving into specific questions. For example, it should confirm willingness to assist and perhaps suggest what kinds of questions would be ...",
+      "The response should recognize that the user has provided three distinct texts as source material: Text 1 about planetary motion history, Text 2 about Aristotle's tenets and their evolution, and Text 3 about Aristotle'...",
+      "The response should demonstrate engagement with the user's educational context (A-level philosophy student). For example, it should use language and explanations appropriate for an advanced secondary student rather th...",
+      "The response should provide a brief orientation to how the three texts relate to each other and to the user's stated goal of understanding how Aristotle's laws of motion affected views of the solar system. For example...",
+      "The response should be appropriately concise. For example, it should not exceed 300 words unless providing substantial value through detailed guidance.",
+      "The response should help bridge the connection between Aristotle's metaphysical concepts (from Text 3) and his physical theories (from Text 2). For example, it should note how energeia and entelechia relate to natural...",
+      "The response should signal readiness to answer specific factual questions about the texts in subsequent turns. For example, it should indicate that it has processed all three texts and can address detailed questions a...",
+      "The response should adopt a friendly, approachable tone appropriate for helping a student. For example, it should use warm and encouraging language rather than overly formal or clinical phrasing."
+    ],
+    "compilation_success_rate": 1.0,
+    "execution_success_rate": 0.25,
+    "compilation_failure_count": 0,
+    "execution_failure_count": 6,
+    "top_compilation_errors": [],
+    "top_execution_errors": []
+  },
+  "evaluation_history": [
+    {
+      "generation": 1,
+      "score": 0.00016,
+      "num_tasks": 8,
+      "num_failures": 8,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F1": 2,
+        "F3": 2,
+        "F2": 4
+      },
+      "top_root_causes": [
+        "Protocol produced empty output or timed out; reasoning did not complete.",
+        "Answer does not satisfy all rubric constraints based on judge feedback."
+      ]
+    }
+  ]
+}

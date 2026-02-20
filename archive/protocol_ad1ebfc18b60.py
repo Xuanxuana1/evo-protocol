@@ -1,10 +1,3 @@
-"""Generation-0 CaS seed compiler: general-purpose context compilation."""
-
-from __future__ import annotations
-
-from core.base_sandbox_protocol import BaseCaSCompiler
-
-
 class SeedCaSCompiler(BaseCaSCompiler):
     """Seed CaS compiler that compiles context into dicts/dataclasses via LLM code generation.
 
@@ -29,7 +22,6 @@ class SeedCaSCompiler(BaseCaSCompiler):
             "  helper functions that call _oracle(prompt, return_type) for perception.\n"
             "  _oracle returns strictly-typed values: bool, int, float, or str.\n"
             "  Example: def is_tone_hostile(): return _oracle('Is the tone hostile?', bool)\n"
-            "- Keep generated code compact (prefer concise data structures; avoid huge boilerplate).\n"
             "- NEVER define or override a function/variable named _oracle.\n"
             "- NEVER raise NotImplementedError placeholders.\n"
             "- Only use: dataclasses, json, re, enum, collections, math.\n"
@@ -46,7 +38,7 @@ class SeedCaSCompiler(BaseCaSCompiler):
 
     def generate_solver(self, query: str, sandbox_schema: str) -> str:
         query_text = self._prepare_prompt_text(query, self.query_char_limit)
-        schema_text = self._prepare_prompt_text(sandbox_schema, min(self.context_char_limit, 16000))
+        schema_text = self._prepare_prompt_text(sandbox_schema, min(self.context_char_limit, 120000))
         # Extract variable names from the sandbox code for the solver prompt
         import re
         assignments = re.findall(r"^([A-Za-z_]\w*)\s*=", schema_text, re.MULTILINE)
@@ -61,14 +53,13 @@ class SeedCaSCompiler(BaseCaSCompiler):
             "- The oracle prompt must include: user query + extracted constraints.\n"
             "- Preserve required persona/style/format directives from constraints.\n"
             "- Store your final answer as a string in FINAL_ANSWER.\n"
-            "- Guarantee FINAL_ANSWER is non-empty; if empty, call _oracle again with a stricter prompt.\n"
             "- NEVER define, assign, or override _oracle.\n"
             "- NEVER raise NotImplementedError placeholders.\n"
             "- Do NOT use while-loops.\n"
             "- Do NOT redefine variables from the sandbox.\n\n"
             "Output ONLY executable Python code, no explanations.\n\n"
             f"Query: {query_text}\n\n"
-            f"Sandbox schema excerpt:\n{schema_text[:8000]}"
+            f"Sandbox schema excerpt:\n{schema_text[:20000]}"
         )
         code = self._call_llm(
             [{"role": "user", "content": prompt}],
@@ -83,7 +74,3 @@ class SeedCaSCompiler(BaseCaSCompiler):
         if "```" in text:
             return text.split("```", 1)[1].split("```", 1)[0].strip()
         return text.strip()
-
-
-# Backward compatibility alias
-SeedSandboxProtocol = SeedCaSCompiler

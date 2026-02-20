@@ -1,10 +1,3 @@
-"""Generation-0 CaS seed compiler: general-purpose context compilation."""
-
-from __future__ import annotations
-
-from core.base_sandbox_protocol import BaseCaSCompiler
-
-
 class SeedCaSCompiler(BaseCaSCompiler):
     """Seed CaS compiler that compiles context into dicts/dataclasses via LLM code generation.
 
@@ -61,7 +54,6 @@ class SeedCaSCompiler(BaseCaSCompiler):
             "- The oracle prompt must include: user query + extracted constraints.\n"
             "- Preserve required persona/style/format directives from constraints.\n"
             "- Store your final answer as a string in FINAL_ANSWER.\n"
-            "- Guarantee FINAL_ANSWER is non-empty; if empty, call _oracle again with a stricter prompt.\n"
             "- NEVER define, assign, or override _oracle.\n"
             "- NEVER raise NotImplementedError placeholders.\n"
             "- Do NOT use while-loops.\n"
@@ -83,7 +75,3 @@ class SeedCaSCompiler(BaseCaSCompiler):
         if "```" in text:
             return text.split("```", 1)[1].split("```", 1)[0].strip()
         return text.strip()
-
-
-# Backward compatibility alias
-SeedSandboxProtocol = SeedCaSCompiler

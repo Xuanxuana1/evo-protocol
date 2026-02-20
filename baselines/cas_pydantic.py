@@ -15,6 +15,7 @@ class PydanticCaSCompiler(BaseCaSCompiler):
     """
 
     def compile_sandbox(self, context: str) -> str:
+        context_text = self._prepare_prompt_text(context, self.context_char_limit)
         prompt = (
             "You are a context compiler that uses Pydantic models.\n\n"
             "Convert the following context into Python code that:\n"
@@ -27,10 +28,12 @@ class PydanticCaSCompiler(BaseCaSCompiler):
             "6. For nuanced semantic facts, define functions using _oracle():\n"
             "   def is_tone_negative(): return _oracle('Is the tone negative?', bool)\n\n"
             "Rules:\n"
+            "- If RAW_MESSAGES_JSON exists, preserve role-tagged constraints in variables.\n"
             "- Do NOT use while-loops\n"
+            "- Do NOT define or override _oracle\n"
             "- Do NOT set FINAL_ANSWER\n"
             "- Output ONLY executable Python code\n\n"
-            f"Context:\n{context[:8000]}"
+            f"Context:\n{context_text}"
         )
         code = self._call_llm(
             [{"role": "user", "content": prompt}],
@@ -39,6 +42,7 @@ class PydanticCaSCompiler(BaseCaSCompiler):
         return self._extract_code(code)
 
     def generate_solver(self, query: str, sandbox_schema: str) -> str:
+        query_text = self._prepare_prompt_text(query, self.query_char_limit)
         import re
         assignments = re.findall(r"^([A-Za-z_]\w*)\s*=", sandbox_schema, re.MULTILINE)
         classes = re.findall(r"^class\s+(\w+)", sandbox_schema, re.MULTILINE)
@@ -52,11 +56,13 @@ class PydanticCaSCompiler(BaseCaSCompiler):
             f"Available classes: {class_names}\n\n"
             "Rules:\n"
             "- Access model attributes with dot notation (e.g., model.field)\n"
+            "- Build a constraints summary and use one _oracle(prompt, str) call for final text\n"
             "- Store the final answer in FINAL_ANSWER as a string\n"
             "- Use _oracle(prompt, type) for semantic questions\n"
+            "- Do NOT define or override _oracle\n"
             "- Do NOT use while-loops\n"
             "- Output ONLY executable Python code\n\n"
-            f"Query: {query[:2000]}"
+            f"Query: {query_text}"
         )
         code = self._call_llm(
             [{"role": "user", "content": prompt}],

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import signal
 import sys
 import types
@@ -174,9 +176,12 @@ def execute_sandbox_code(
     if oracle_fn is not None:
         namespace["_oracle"] = oracle_fn
 
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
     try:
-        with _Timeout(timeout):
-            exec(code, namespace)  # noqa: S102
+        with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
+            with _Timeout(timeout):
+                exec(code, namespace)  # noqa: S102
     except TimeoutError as exc:
         return ExecutionResult(success=False, error=str(exc))
     except AssertionError as exc:
@@ -198,7 +203,14 @@ def execute_sandbox_code(
 
     # Check for FINAL_ANSWER
     final_answer = namespace.get("FINAL_ANSWER")
-    output = str(final_answer) if final_answer is not None else ""
+    captured_stdout = stdout_buffer.getvalue().strip()
+    captured_stderr = stderr_buffer.getvalue().strip()
+    if final_answer is not None:
+        output = str(final_answer)
+    elif captured_stdout:
+        output = captured_stdout
+    else:
+        output = captured_stderr
 
     return ExecutionResult(success=True, output=output, namespace=namespace)
 

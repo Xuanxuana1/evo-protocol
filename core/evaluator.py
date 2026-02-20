@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Any
 
@@ -35,6 +36,52 @@ def _build_effective_context(record: TaskRecord) -> str:
     return f"{context}\n\n---\nPrior conversation:\n{suffix}" if context else suffix
 
 
+def _build_cas_inputs(record: TaskRecord) -> tuple[str, str]:
+    """Build role-preserving CaS context/query payloads."""
+
+    normalized_messages = [
+        {
+            "role": str(message.get("role", "")),
+            "content": str(message.get("content", "")),
+        }
+        for message in record.messages_raw
+    ]
+    messages_json = json.dumps(normalized_messages, ensure_ascii=False)
+    base_context = str(record.context or "")
+    context_sections = [
+        "RAW_MESSAGES_JSON (role-preserving):\n"
+        f"{messages_json}",
+    ]
+    if base_context and not _context_covered_by_messages(base_context, normalized_messages):
+        context_sections.append(
+            "SYSTEM_CONTEXT_EXTRACT:\n"
+            f"{base_context}"
+        )
+    context_payload = "\n\n".join(context_sections)
+    query_payload = (
+        "LAST_USER_QUERY:\n"
+        f"{str(record.query or '')}\n\n"
+        "Use all constraints from RAW_MESSAGES_JSON when producing FINAL_ANSWER."
+    )
+    return context_payload, query_payload
+
+
+def _context_covered_by_messages(base_context: str, messages: list[dict[str, str]]) -> bool:
+    compact_context = re.sub(r"\s+", " ", str(base_context or "")).strip()
+    if not compact_context:
+        return True
+    for message in messages:
+        role = str(message.get("role", "")).strip().lower()
+        if role != "system":
+            continue
+        compact_content = re.sub(r"\s+", " ", str(message.get("content", ""))).strip()
+        if not compact_content:
+            continue
+        if compact_context in compact_content or compact_content in compact_context:
+            return True
+    return False
+
+
 def _clone_protocol(protocol: Any) -> Any:
     """Clone protocol for parallel workers to avoid shared mutable state."""
 
@@ -64,14 +111,21 @@ def run_protocol_on_benchmark(
     benchmark = get_benchmark(benchmark_name, **(benchmark_kwargs or {}))
     tasks = benchmark.load_tasks(data_path=data_path, split=split)
     if protocol_loader is None:
-        loader: ProtocolLoader | SandboxProtocolLoader = ProtocolLoader(protocol.llm, protocol.model)
+        if isinstance(protocol, BaseCaSCompiler):
+            loader = SandboxProtocolLoader(protocol.llm, protocol.model)
+        else:
+            loader = ProtocolLoader(protocol.llm, protocol.model)
     else:
         loader = protocol_loader
 
     def process(record: TaskRecord) -> TaskRecord:
         local_protocol = protocol if workers == 1 else _clone_protocol(protocol)
-        context = _build_effective_context(record)
-        result = loader.run_with_timeout(local_protocol, context=context, query=record.query)
+        if isinstance(local_protocol, BaseCaSCompiler):
+            context, query = _build_cas_inputs(record)
+        else:
+            context = _build_effective_context(record)
+            query = record.query
+        result = loader.run_with_timeout(local_protocol, context=context, query=query)
 
         if result is None:
             record.model_output = ""

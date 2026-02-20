@@ -1,10 +1,3 @@
-"""Generation-0 CaS seed compiler: general-purpose context compilation."""
-
-from __future__ import annotations
-
-from core.base_sandbox_protocol import BaseCaSCompiler
-
-
 class SeedCaSCompiler(BaseCaSCompiler):
     """Seed CaS compiler that compiles context into dicts/dataclasses via LLM code generation.
 
@@ -83,7 +76,3 @@ class SeedCaSCompiler(BaseCaSCompiler):
         if "```" in text:
             return text.split("```", 1)[1].split("```", 1)[0].strip()
         return text.strip()
-
-
-# Backward compatibility alias
-SeedSandboxProtocol = SeedCaSCompiler

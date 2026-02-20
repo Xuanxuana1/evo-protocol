@@ -40,13 +40,14 @@ class EvolutionConfig:
     max_repair_attempts: int = 2
     seed: int = 42
     mode: str = "cas"
+    init_population_size: int = 0
     sandbox_timeout_seconds: int = 30
     selection_tau: float = 0.5
     selection_alpha: float = 0.5
     fitness_weights: dict[str, float] = field(default_factory=lambda: {
-        "answer_correctness": 0.6,
-        "execution_success": 0.2,
-        "compilation_success": 0.2,
+        "answer_correctness": 0.8,
+        "execution_success": 0.1,
+        "compilation_success": 0.1,
     })
 
 
@@ -100,6 +101,11 @@ class EvolutionEngine:
         if protocol is None:
             raise ValueError(f"Initial protocol failed validation: {error.message if error else 'unknown'}")
 
+        init_population_size = int(getattr(self.config, "init_population_size", 0) or 0)
+        if init_population_size <= 0:
+            init_population_size = self.config.population_size
+        init_population_size = max(1, min(init_population_size, self.config.population_size))
+
         init_sha = self.archive.save(initial_code, generation=0, score=None)
         base_candidate = {
             "sha": init_sha,
@@ -110,7 +116,7 @@ class EvolutionEngine:
             "failures": [],
         }
         population = [dict(base_candidate)]
-        for _ in range(self.config.population_size - 1):
+        for _ in range(init_population_size - 1):
             cloned_protocol, _ = self.loader.load_from_code(initial_code)
             population.append(
                 {
@@ -132,6 +138,7 @@ class EvolutionEngine:
                 "time": self._now_iso(),
                 "generations": self.config.generations,
                 "population_size": self.config.population_size,
+                "init_population_size": init_population_size,
                 "elite_count": self.config.elite_count,
                 "tasks_per_evaluation": self.config.tasks_per_evaluation,
                 "benchmark": getattr(self.benchmark, "name", "unknown"),
@@ -158,10 +165,15 @@ class EvolutionEngine:
                 candidate["mode_accuracy"] = mode_accuracy
                 candidate["failures"] = failures
                 candidate["eval_summary"] = eval_summary
+                candidate["answer_accuracy"] = float(eval_summary.get("accuracy", 0.0))
+                candidate["selection_score"] = self._compute_selection_score(
+                    fitness=fitness,
+                    eval_summary=eval_summary,
+                )
                 self.archive.update_evaluation(
                     sha=candidate["sha"],
                     generation=generation,
-                    score=fitness,
+                    score=float(candidate["selection_score"]),
                     failure_summary=eval_summary,
                 )
                 candidate_log = {
@@ -171,6 +183,8 @@ class EvolutionEngine:
                     "population_size": len(population),
                     "sha": candidate["sha"],
                     "fitness": fitness,
+                    "accuracy": candidate["answer_accuracy"],
+                    "selection_score": candidate["selection_score"],
                     "num_failures": len(failures),
                     "failure_mode_counts": eval_summary.get("failure_mode_counts", {}),
                     "avg_tokens_per_task": eval_summary.get("avg_tokens_per_task", 0.0),
@@ -187,11 +201,12 @@ class EvolutionEngine:
                 print(
                     f"[Gen {generation}] candidate {idx}/{len(population)} "
                     f"sha={candidate['sha']} fitness={fitness:.4f} "
+                    f"accuracy={candidate['answer_accuracy']:.4f} "
                     f"failures={len(failures)}"
                 )
                 self._append_failure_samples(generation, candidate["sha"], failures)
 
-            ranked = sorted(population, key=lambda item: item["fitness"], reverse=True)
+            ranked = sorted(population, key=self._candidate_rank_key, reverse=True)
             elites = ranked[: max(1, self.config.elite_count)]
             best = elites[0]
             diversity = self._compute_population_diversity(ranked)
@@ -199,6 +214,8 @@ class EvolutionEngine:
                 "generation": generation,
                 "best_sha": best["sha"],
                 "best_fitness": best["fitness"],
+                "best_accuracy": float(best.get("answer_accuracy", 0.0)),
+                "best_selection_score": float(best.get("selection_score", 0.0)),
                 "mean_fitness": mean([item["fitness"] for item in ranked]),
                 "unique_protocols": len({item["sha"] for item in ranked}),
                 "code_diversity": diversity["code_diversity"],
@@ -217,6 +234,7 @@ class EvolutionEngine:
             )
             print(
                 f"[Gen {generation}] best={gen_record['best_fitness']:.4f} "
+                f"best_acc={gen_record['best_accuracy']:.4f} "
                 f"mean={gen_record['mean_fitness']:.4f} "
                 f"diversity={gen_record['code_diversity']:.4f}"
             )
@@ -227,6 +245,7 @@ class EvolutionEngine:
             new_population = [dict(item) for item in elites]
             mutation_attempts = 0
             max_attempts = self.config.population_size * 6
+            existing_child_shas = {str(item.get("sha", "")) for item in new_population if str(item.get("sha", ""))}
             elite_by_sha: dict[str, dict[str, Any]] = {}
             for item in elites:
                 sha = str(item.get("sha", "")).strip()
@@ -247,7 +266,11 @@ class EvolutionEngine:
                 parent = elite_by_sha.get(selected_sha) if selected_sha else None
                 if parent is None:
                     parent = self.rng.choice(elites)
-                parent_perf = self._build_parent_performance(parent.get("mode_accuracy", {}), parent["fitness"], parent.get("eval_summary"))
+                parent_perf = self._build_parent_performance(
+                    parent.get("mode_accuracy", {}),
+                    float(parent.get("answer_accuracy", parent["fitness"])),
+                    parent.get("eval_summary"),
+                )
                 failures = parent.get("failures", [])
                 sampled_failures = self.rng.sample(
                     failures,
@@ -257,12 +280,24 @@ class EvolutionEngine:
                 child_protocol, child_code_or_err = self.meta_architect.mutate(
                     loader=self.loader,
                     generation=generation,
+                    mutation_attempt=mutation_attempts,
                     parent_code=parent["code"],
                     parent_performance=parent_perf,
                     failure_examples=sampled_failures,
                     max_repair_attempts=self.config.max_repair_attempts,
                 )
                 if child_protocol is None:
+                    self._append_jsonl(
+                        self.generation_trace_path,
+                        {
+                            "run_id": self.run_id,
+                            "event": "mutation_rejected",
+                            "time": self._now_iso(),
+                            "generation": generation,
+                            "parent_sha": parent["sha"],
+                            "reason": str(child_code_or_err)[:320],
+                        },
+                    )
                     continue
 
                 child_code = child_code_or_err
@@ -271,12 +306,28 @@ class EvolutionEngine:
                     generation=generation,
                     parent_sha=parent["sha"],
                 )
+                if child_sha in existing_child_shas:
+                    self._append_jsonl(
+                        self.generation_trace_path,
+                        {
+                            "run_id": self.run_id,
+                            "event": "mutation_duplicate",
+                            "time": self._now_iso(),
+                            "generation": generation,
+                            "parent_sha": parent["sha"],
+                            "child_sha": child_sha,
+                        },
+                    )
+                    continue
+                existing_child_shas.add(child_sha)
                 new_population.append(
                     {
                         "sha": child_sha,
                         "code": child_code,
                         "protocol": child_protocol,
                         "fitness": 0.0,
+                        "selection_score": 0.0,
+                        "answer_accuracy": 0.0,
                         "mode_accuracy": {},
                         "failures": [],
                     }
@@ -287,7 +338,7 @@ class EvolutionEngine:
 
             population = new_population
 
-        best_final = max(population, key=lambda item: item["fitness"])
+        best_final = max(population, key=self._candidate_rank_key)
         self._append_jsonl(
             self.generation_trace_path,
             {
@@ -296,12 +347,16 @@ class EvolutionEngine:
                 "time": self._now_iso(),
                 "best_sha": best_final["sha"],
                 "best_fitness": best_final["fitness"],
+                "best_accuracy": float(best_final.get("answer_accuracy", 0.0)),
+                "best_selection_score": float(best_final.get("selection_score", 0.0)),
             },
         )
         return {
             "run_id": self.run_id,
             "best_sha": best_final["sha"],
             "best_fitness": best_final["fitness"],
+            "best_accuracy": float(best_final.get("answer_accuracy", 0.0)),
+            "best_selection_score": float(best_final.get("selection_score", 0.0)),
             "history": history,
             "mode": self.config.mode,
             "log_files": {
@@ -368,7 +423,11 @@ class EvolutionEngine:
                 },
             )
 
-            effective_context = self._build_effective_context(record)
+            if self._is_cas:
+                effective_context, effective_query = self._build_cas_inputs(record)
+            else:
+                effective_context = self._build_effective_context(record)
+                effective_query = record.query
             worker_timer = perf_counter()
             self._append_jsonl(
                 self.task_trace_path,
@@ -379,7 +438,7 @@ class EvolutionEngine:
                     **task_info,
                 },
             )
-            result = self.loader.run_with_timeout(protocol, context=effective_context, query=record.query)
+            result = self.loader.run_with_timeout(protocol, context=effective_context, query=effective_query)
             worker_seconds = perf_counter() - worker_timer
             if result is None:
                 record.model_output = ""
@@ -506,6 +565,8 @@ class EvolutionEngine:
 
                 failure_record: dict[str, Any] = {
                     "task_id": record.task_id,
+                    "context_category": str(record.metadata.get("context_category", "unknown")),
+                    "sub_category": str(record.metadata.get("sub_category", "unknown")),
                     "query": record.query,
                     "answer": record.model_output or "",
                     "score": score,
@@ -610,6 +671,52 @@ class EvolutionEngine:
         suffix = "\n".join(prior_turns)
         return f"{context}\n\n---\nPrior conversation:\n{suffix}" if context else suffix
 
+    @staticmethod
+    def _build_cas_inputs(record: TaskRecord) -> tuple[str, str]:
+        """Build role-preserving CaS context/query payloads."""
+
+        normalized_messages = [
+            {
+                "role": str(message.get("role", "")),
+                "content": str(message.get("content", "")),
+            }
+            for message in record.messages_raw
+        ]
+        messages_json = json.dumps(normalized_messages, ensure_ascii=False)
+        base_context = str(record.context or "")
+        context_sections = [
+            "RAW_MESSAGES_JSON (role-preserving):\n"
+            f"{messages_json}",
+        ]
+        if base_context and not EvolutionEngine._context_covered_by_messages(base_context, normalized_messages):
+            context_sections.append(
+                "SYSTEM_CONTEXT_EXTRACT:\n"
+                f"{base_context}"
+            )
+        context_payload = "\n\n".join(context_sections)
+        query_payload = (
+            "LAST_USER_QUERY:\n"
+            f"{str(record.query or '')}\n\n"
+            "Use all constraints from RAW_MESSAGES_JSON when producing FINAL_ANSWER."
+        )
+        return context_payload, query_payload
+
+    @staticmethod
+    def _context_covered_by_messages(base_context: str, messages: list[dict[str, str]]) -> bool:
+        compact_context = re.sub(r"\s+", " ", str(base_context or "")).strip()
+        if not compact_context:
+            return True
+        for message in messages:
+            role = str(message.get("role", "")).strip().lower()
+            if role != "system":
+                continue
+            compact_content = re.sub(r"\s+", " ", str(message.get("content", ""))).strip()
+            if not compact_content:
+                continue
+            if compact_context in compact_content or compact_content in compact_context:
+                return True
+        return False
+
     def _sample_tasks(self, sample_size: int) -> list[TaskRecord]:
         if sample_size >= len(self.tasks):
             return list(self.tasks)
@@ -636,6 +743,36 @@ class EvolutionEngine:
             compilation_success_rate=compilation_rate,
             execution_success_rate=execution_rate,
         )
+
+    def _compute_selection_score(self, fitness: float, eval_summary: dict[str, Any]) -> float:
+        """Accuracy-first score used for ranking/parent selection."""
+
+        accuracy = float(eval_summary.get("accuracy", 0.0))
+        if not self._is_cas:
+            return accuracy + 1e-3 * float(fitness)
+
+        execution_rate = float(eval_summary.get("execution_success_rate", 0.0))
+        compilation_rate = float(eval_summary.get("compilation_success_rate", 0.0))
+        # Lexicographic preference: accuracy dominates, runtime metrics break ties.
+        return (
+            accuracy
+            + 1e-3 * float(fitness)
+            + 1e-4 * execution_rate
+            + 1e-5 * compilation_rate
+        )
+
+    @staticmethod
+    def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, float, float, float]:
+        """Sort key that prioritizes answer accuracy over proxy runtime metrics."""
+
+        summary = item.get("eval_summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        accuracy = float(item.get("answer_accuracy", summary.get("accuracy", 0.0)))
+        fitness = float(item.get("fitness", 0.0))
+        execution_rate = float(summary.get("execution_success_rate", 1.0))
+        compilation_rate = float(summary.get("compilation_success_rate", 1.0))
+        return (accuracy, fitness, execution_rate, compilation_rate)
 
     def _build_failure_feedback(self, record: TaskRecord) -> dict[str, Any]:
         """Create structured failure analysis for mutation feedback."""
@@ -894,6 +1031,8 @@ class EvolutionEngine:
         }
 
         if is_cas:
+            compilation_failure_count = max(0, total - int(compilation_success_count))
+            execution_failure_count = max(0, total - int(execution_success_count))
             summary["compilation_success_rate"] = float(compilation_success_count / total)
             summary["execution_success_rate"] = float(execution_success_count / total)
             summary["compilation_failure_count"] = int(compilation_failure_count)
@@ -958,6 +1097,8 @@ class EvolutionEngine:
                 "generation": generation,
                 "sha": sha,
                 "task_id": item.get("task_id"),
+                "context_category": item.get("context_category", "unknown"),
+                "sub_category": item.get("sub_category", "unknown"),
                 "score": item.get("score"),
                 "failure_mode": item.get("failure_mode"),
                 "query": str(item.get("query", ""))[:300],

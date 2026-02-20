@@ -2,68 +2,64 @@
   "sha": "7d9a23baf9af",
   "generation": 0,
   "parent_sha": null,
-  "score": 0.26666666666666666,
-  "visit_count": 1,
+  "score": 0.00010333333333333334,
+  "visit_count": 24,
   "seen_generations": [
     0
   ],
-  "eval_count": 2,
-  "last_evaluated_generation": 1,
+  "eval_count": 8,
+  "last_evaluated_generation": 2,
   "best_score": 0.4,
   "last_failure_summary": {
     "num_tasks": 3,
     "num_failures": 3,
-    "fitness": 0.26666666666666666,
+    "fitness": 0.06666666666666667,
     "failure_rate": 1.0,
     "accuracy": 0.0,
-    "avg_tokens_per_task": 8251.333333333334,
-    "max_tokens_per_task": 14444,
+    "avg_tokens_per_task": 3003.6666666666665,
+    "max_tokens_per_task": 6483,
     "token_efficiency": 0.0,
-    "fitness_token_efficiency": 3.231800921063262e-05,
-    "verification_failed_count": 1,
+    "fitness_token_efficiency": 2.219509488403063e-05,
+    "verification_failed_count": 2,
     "attention_drift_mean": null,
     "attention_drift_high_rate": null,
     "attention_drift_measured_tasks": 0,
     "failure_mode_counts": {
-      "F3": 1,
       "F1": 1,
+      "F3": 1,
       "F2": 1
     },
     "top_root_causes": [
-      "Answer does not satisfy all rubric constraints based on judge feedback.",
-      "Protocol produced empty output or timed out; reasoning did not complete."
+      "Protocol produced empty output or timed out; reasoning did not complete.",
+      "Answer does not satisfy all rubric constraints based on judge feedback."
     ],
     "top_repair_actions": [
-      "Improve perception granularity for long context sections.",
-      "Add intermediate reasoning checks before final synthesis.",
       "Add runtime guards and fallback answer path.",
-      "Reduce per-task complexity and LLM call count."
+      "Reduce per-task complexity and LLM call count.",
+      "Improve perception granularity for long context sections.",
+      "Add intermediate reasoning checks before final synthesis."
     ],
     "top_unsatisfied_rubrics": [
-      "The response should acknowledge the user's request for preliminary help before diving into specific questions. For example, it should confirm willingness to assist and perhaps suggest what kinds of questions would be ...",
-      "The response should recognize that the user has provided three distinct texts as source material: Text 1 about planetary motion history, Text 2 about Aristotle's tenets and their evolution, and Text 3 about Aristotle'...",
-      "The response should demonstrate engagement with the user's educational context (A-level philosophy student). For example, it should use language and explanations appropriate for an advanced secondary student rather th...",
-      "The response should provide a brief orientation to how the three texts relate to each other and to the user's stated goal of understanding how Aristotle's laws of motion affected views of the solar system. For example...",
-      "The response should help bridge the connection between Aristotle's metaphysical concepts (from Text 3) and his physical theories (from Text 2). For example, it should note how energeia and entelechia relate to natural...",
-      "The response should signal readiness to answer specific factual questions about the texts in subsequent turns. For example, it should indicate that it has processed all three texts and can address detailed questions a...",
-      "The response should adopt a friendly, approachable tone appropriate for helping a student. For example, it should use warm and encouraging language rather than overly formal or clinical phrasing.",
-      "The response should be written in language appropriate for a five-year-old. For example, it could require short sentences, familiar words, and defining terms like “rent” in kid-friendly ways."
+      "The response should accurately describe the mathematical meaning of zeroth order systems and first order systems. For example, describe that the degree of a polynomial is the order.",
+      "The response should explain how the examples that display as 3.4.1 and 3.4.2 differ because of the order of the equation:\r\n\\subsubsection{Zeroth order system: magnetic rotating shallow water equations}\\label{sec4.4.1}...",
+      "The response should not explain examples other than ones in the excerpt below:\r\n\\subsubsection{Zeroth order system: magnetic rotating shallow water equations}\\label{sec4.4.1}\r\n%=================================\r\nUsing..."
     ],
-    "compilation_success_rate": 0.6666666666666666,
-    "execution_success_rate": 0.6666666666666666,
-    "compilation_failure_count": 1,
-    "execution_failure_count": 1,
+    "compilation_success_rate": 0.3333333333333333,
+    "execution_success_rate": 0.3333333333333333,
+    "compilation_failure_count": 2,
+    "execution_failure_count": 2,
     "top_compilation_errors": [
       "AssertionError (constraint violation): "
     ],
     "top_execution_errors": [
+      "execution failed or timed out",
       "AssertionError (constraint violation): "
     ]
   },
   "evaluation_history": [
     {
       "generation": 1,
-      "score": 0.26666666666666666,
+      "score": 0.00031000000000000005,
       "num_tasks": 3,
       "num_failures": 3,
       "failure_rate": 1.0,
@@ -73,12 +69,30 @@
       "attention_drift_measured_tasks": 0,
       "failure_mode_counts": {
         "F3": 1,
+        "F1": 2
+      },
+      "top_root_causes": [
+        "Answer does not satisfy all rubric constraints based on judge feedback."
+      ]
+    },
+    {
+      "generation": 2,
+      "score": 0.00010333333333333334,
+      "num_tasks": 3,
+      "num_failures": 3,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
         "F1": 1,
+        "F3": 1,
         "F2": 1
       },
       "top_root_causes": [
-        "Answer does not satisfy all rubric constraints based on judge feedback.",
-        "Protocol produced empty output or timed out; reasoning did not complete."
+        "Protocol produced empty output or timed out; reasoning did not complete.",
+        "Answer does not satisfy all rubric constraints based on judge feedback."
       ]
     }
   ]

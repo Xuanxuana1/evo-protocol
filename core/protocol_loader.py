@@ -116,7 +116,7 @@ class ProtocolLoader:
         llm_client,
         model_name: str,
         timeout_seconds: int = 300,
-        max_llm_calls_per_task: int = 10,
+        max_llm_calls_per_task: int = 20,
         use_process_timeout: bool = True,
     ):
         self.llm_client = llm_client
@@ -478,7 +478,7 @@ class SandboxProtocolLoader:
         model_name: str,
         timeout_seconds: int = 300,
         sandbox_timeout_seconds: int = 30,
-        max_llm_calls_per_task: int = 10,
+        max_llm_calls_per_task: int = 20,
         use_process_timeout: bool = True,
     ):
         self.llm_client = llm_client

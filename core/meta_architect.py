@@ -35,6 +35,7 @@ class MetaArchitect:
     def build_prompt(
         self,
         generation: int,
+        mutation_attempt: int,
         parent_code: str,
         parent_performance: ParentPerformance,
         failure_examples: list[dict[str, Any]],
@@ -42,13 +43,14 @@ class MetaArchitect:
         """Build architect prompt grounded on observed failures."""
 
         if self.mode == "cas":
-            return self._build_cas_prompt(generation, parent_code, parent_performance, failure_examples)
-        return self._build_legacy_prompt(generation, parent_code, parent_performance, failure_examples)
+            return self._build_cas_prompt(generation, mutation_attempt, parent_code, parent_performance, failure_examples)
+        return self._build_legacy_prompt(generation, mutation_attempt, parent_code, parent_performance, failure_examples)
 
     def mutate(
         self,
         loader: Union[ProtocolLoader, SandboxProtocolLoader],
         generation: int,
+        mutation_attempt: int,
         parent_code: str,
         parent_performance: ParentPerformance,
         failure_examples: list[dict[str, Any]],
@@ -58,6 +60,7 @@ class MetaArchitect:
 
         prompt = self.build_prompt(
             generation=generation,
+            mutation_attempt=mutation_attempt,
             parent_code=parent_code,
             parent_performance=parent_performance,
             failure_examples=failure_examples,
@@ -68,6 +71,7 @@ class MetaArchitect:
             architect_prompt=prompt,
             loader=loader,
             max_repair_attempts=max_repair_attempts,
+            request_tag=f"g{generation}-m{mutation_attempt}",
         )
 
     # ------------------------------------------------------------------
@@ -77,6 +81,7 @@ class MetaArchitect:
     def _build_cas_prompt(
         self,
         generation: int,
+        mutation_attempt: int,
         parent_code: str,
         parent_performance: ParentPerformance,
         failure_examples: list[dict[str, Any]],
@@ -151,17 +156,34 @@ class MetaArchitect:
 
             Constraints:
             1) Import from core.base_sandbox_protocol: BaseCaSCompiler
+            1.1) Generate exactly ONE class inheriting BaseCaSCompiler.
+            1.2) Keep method signatures exact:
+                 - def compile_sandbox(self, context: str) -> str
+                 - def generate_solver(self, query: str, sandbox_schema: str) -> str
             2) Use only allowed libraries (re, json, math, collections, itertools,
                functools, typing, dataclasses, copy, random, statistics, string,
                operator, abc, enum, datetime, pydantic, networkx).
             3) No file I/O, no external APIs, no network calls.
-            4) Keep total LLM calls within 10 per task.
+            4) Keep total LLM calls within 20 per task.
             5) Do NOT use while-loops. Use bounded for-loops.
             6) Never define, assign, or override `_oracle`; runtime injects it.
             7) Never use `raise NotImplementedError(...)` placeholders.
-            8) Return only executable Python code.
+            8) Avoid aggressive truncation like context[:8000]/query[:2000];
+               preserve long-context signals whenever possible.
+            9) Return only executable Python code.
+            10) NEVER override immutable runtime methods from BaseCaSCompiler:
+                __init__, run, _call_llm, _make_oracle_fn, _sanitize_generated_code,
+                _attempt_syntax_repair, _answer_with_oracle_fallback,
+                _derive_dynamic_call_budget.
+            11) Output MUST include exactly one top-level subclass of BaseCaSCompiler.
+                If unsure, follow this structure:
+                from core.base_sandbox_protocol import BaseCaSCompiler
+                class EvoCaSCompiler(BaseCaSCompiler):
+                    def compile_sandbox(self, context: str) -> str: ...
+                    def generate_solver(self, query: str, sandbox_schema: str) -> str: ...
 
             Current generation: {generation}
+            Mutation attempt id: {mutation_attempt}
 
             Parent performance:
             - Overall accuracy: {parent_performance.overall:.1%}
@@ -197,6 +219,8 @@ class MetaArchitect:
               solver code, ensure types match between sandbox and solver.
             - Wrong answers: Richer sandbox with more complete fact encoding, add
               _oracle for nuanced facts that were missed.
+            - Role/format misses: Explicitly encode role-specific constraints from
+              RAW_MESSAGES_JSON and pass those constraints into solver/oracle prompts.
 
             Output only complete Python code.
             """
@@ -209,6 +233,7 @@ class MetaArchitect:
     def _build_legacy_prompt(
         self,
         generation: int,
+        mutation_attempt: int,
         parent_code: str,
         parent_performance: ParentPerformance,
         failure_examples: list[dict[str, Any]],
@@ -232,6 +257,7 @@ class MetaArchitect:
             9) Return only executable Python code.
 
             Current generation: {generation}
+            Mutation attempt id: {mutation_attempt}
 
             Parent performance:
             - Overall: {parent_performance.overall:.1%}
@@ -301,6 +327,10 @@ class MetaArchitect:
             snippet_line = ""
             if sandbox_code_snippet:
                 snippet_line = f"\n                    sandbox_code: {sandbox_code_snippet}"
+            task_type_line = (
+                f"\n                    task_type: "
+                f"{item.get('context_category', 'unknown')} / {item.get('sub_category', 'unknown')}"
+            )
 
             lines.append(
                 textwrap.dedent(
@@ -312,7 +342,7 @@ class MetaArchitect:
                     root_cause: {root_cause[:260]}
                     classifier: source={source} confidence={confidence}
                     unsatisfied_rubrics: {unsatisfied_text}
-                    repair_actions: {actions_text}{cas_info}{snippet_line}
+                    repair_actions: {actions_text}{task_type_line}{cas_info}{snippet_line}
                     """
                 ).strip()
             )

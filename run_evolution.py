@@ -89,12 +89,18 @@ def main() -> None:
     parser.add_argument("--disable-attention-drift", action="store_true", help="Disable attention-drift metric scoring")
     parser.add_argument("--generations", type=int, default=5)
     parser.add_argument("--population-size", type=int, default=4)
+    parser.add_argument(
+        "--init-population-size",
+        type=int,
+        default=0,
+        help="Initial population size at Gen1 (0 means use --population-size)",
+    )
     parser.add_argument("--elite-count", type=int, default=2)
     parser.add_argument("--tasks-per-eval", type=int, default=20)
     parser.add_argument("--failure-samples-per-mutation", type=int, default=5)
     parser.add_argument("--archive-dir", default="archive")
     parser.add_argument("--max-repair-attempts", type=int, default=2)
-    parser.add_argument("--max-llm-calls-per-task", type=int, default=10)
+    parser.add_argument("--max-llm-calls-per-task", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default="outputs/evolution_result.json", help="Where to save final summary")
     parser.add_argument("--skip-final-eval", action="store_true", help="Skip final evaluation of best protocol")
@@ -144,6 +150,9 @@ def main() -> None:
     split_seed = int(resolve_cli_or_config("split_seed", benchmark_cfg.get("split_seed")))
     generations = int(resolve_cli_or_config("generations", evolution_cfg.get("generations")))
     population_size = int(resolve_cli_or_config("population_size", evolution_cfg.get("population_size")))
+    init_population_size = int(
+        resolve_cli_or_config("init_population_size", evolution_cfg.get("init_population_size"))
+    )
     elite_count = int(resolve_cli_or_config("elite_count", evolution_cfg.get("elite_count")))
     tasks_per_eval = int(resolve_cli_or_config("tasks_per_eval", evolution_cfg.get("tasks_per_evaluation")))
     failure_samples_per_mutation = int(
@@ -164,6 +173,18 @@ def main() -> None:
         selection_cfg = {}
     selection_tau = float(resolve_cli_or_config("selection_tau", selection_cfg.get("tau")))
     selection_alpha = float(resolve_cli_or_config("selection_alpha", selection_cfg.get("alpha")))
+
+    if population_size < 6 or tasks_per_eval < 10:
+        print(
+            "[Warn] Evolution search space is very small "
+            f"(population_size={population_size}, tasks_per_eval={tasks_per_eval}). "
+            "For meaningful evolution, prefer population_size>=6 and tasks_per_eval>=10."
+        )
+    if init_population_size == 1 and generations < 2:
+        print(
+            "[Warn] init_population_size=1 with generations<2 evaluates only the root "
+            "protocol and will not show mutation expansion."
+        )
 
     worker_model = (
         resolve_cli_or_config("worker_model", evolution_cfg.get("worker_model"))
@@ -216,9 +237,9 @@ def main() -> None:
     if not isinstance(fitness_weights_cfg, dict):
         fitness_weights_cfg = {}
     fitness_weights = {
-        "answer_correctness": float(fitness_weights_cfg.get("answer_correctness", 0.6)),
-        "execution_success": float(fitness_weights_cfg.get("execution_success", 0.2)),
-        "compilation_success": float(fitness_weights_cfg.get("compilation_success", 0.2)),
+        "answer_correctness": float(fitness_weights_cfg.get("answer_correctness", 0.8)),
+        "execution_success": float(fitness_weights_cfg.get("execution_success", 0.1)),
+        "compilation_success": float(fitness_weights_cfg.get("compilation_success", 0.1)),
     }
 
     base_url = args.base_url or first_env(["OPENAI_BASE_URL", "BASE_URL", "OPENAI_API_BASE"])
@@ -291,6 +312,7 @@ def main() -> None:
         max_repair_attempts=max_repair_attempts,
         seed=seed,
         mode=mode,
+        init_population_size=init_population_size,
         sandbox_timeout_seconds=sandbox_timeout,
         selection_tau=selection_tau,
         selection_alpha=selection_alpha,

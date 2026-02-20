@@ -1,0 +1,111 @@
+{
+  "sha": "ad1ebfc18b60",
+  "generation": 0,
+  "parent_sha": null,
+  "score": 0.000106,
+  "visit_count": 36,
+  "seen_generations": [
+    0
+  ],
+  "eval_count": 10,
+  "last_evaluated_generation": 2,
+  "best_score": 0.100328,
+  "last_failure_summary": {
+    "num_tasks": 10,
+    "num_failures": 10,
+    "fitness": 0.08,
+    "failure_rate": 1.0,
+    "accuracy": 0.0,
+    "avg_tokens_per_task": 42392.9,
+    "max_tokens_per_task": 85458,
+    "token_efficiency": 0.0,
+    "fitness_token_efficiency": 1.8871084544817647e-06,
+    "verification_failed_count": 8,
+    "attention_drift_mean": null,
+    "attention_drift_high_rate": null,
+    "attention_drift_measured_tasks": 0,
+    "failure_mode_counts": {
+      "F2": 8,
+      "F1": 1,
+      "F3": 1
+    },
+    "top_root_causes": [
+      "Protocol produced empty output or timed out; reasoning did not complete.",
+      "Answer does not satisfy all rubric constraints based on judge feedback."
+    ],
+    "top_repair_actions": [
+      "Add runtime guards and fallback answer path.",
+      "Reduce per-task complexity and LLM call count.",
+      "Improve perception granularity for long context sections.",
+      "Add intermediate reasoning checks before final synthesis."
+    ],
+    "top_unsatisfied_rubrics": [
+      "The response should state that Tiny8 uses a byte-addressable memory model i.e. each address holds one 8-bit value",
+      "The response should state that Tiny8 has configurable RAM size",
+      "The response should state that Tiny8 has a default RAM size of 2048 bytes or 2KB",
+      "The response should state that Tiny8 has a default address range of 0x0000 to 0x07FF",
+      "The response should state that the stack pointer initializes to 0x07FF, which is one less than the size of the RAM",
+      "The response should state that the stack grows downwards i.e. the stack pointer is decremented when something is pushed onto the stack",
+      "The response should state that there is no fixed boundary between stack and data areas",
+      "The response should warn about collisions between the stack memory (growing down) and data memory (growing up)"
+    ],
+    "compilation_success_rate": 0.6,
+    "execution_success_rate": 0.2,
+    "compilation_failure_count": 4,
+    "execution_failure_count": 8,
+    "top_compilation_errors": [
+      "ImportError: cannot import name 'dataclasses' from 'dataclasses' (/Users/liuxuan/miniconda3/envs/acl",
+      "ImportError: Import of '_strptime' is not allowed in sandbox.",
+      "Safety check failed: while-loops are forbidden; use bounded for-loops.",
+      "AssertionError (constraint violation): "
+    ],
+    "top_execution_errors": [
+      "ImportError: cannot import name 'dataclasses' from 'dataclasses' (/Users/liuxuan/miniconda3/envs/acl",
+      "ImportError: Import of '_strptime' is not allowed in sandbox.",
+      "Safety check failed: while-loops are forbidden; use bounded for-loops.",
+      "AssertionError (constraint violation): "
+    ]
+  },
+  "evaluation_history": [
+    {
+      "generation": 1,
+      "score": 0.00017700000000000002,
+      "num_tasks": 10,
+      "num_failures": 10,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F3": 3,
+        "F1": 4,
+        "F2": 3
+      },
+      "top_root_causes": [
+        "Answer does not satisfy all rubric constraints based on judge feedback.",
+        "Protocol produced empty output or timed out; reasoning did not complete."
+      ]
+    },
+    {
+      "generation": 2,
+      "score": 0.000106,
+      "num_tasks": 10,
+      "num_failures": 10,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F2": 8,
+        "F1": 1,
+        "F3": 1
+      },
+      "top_root_causes": [
+        "Protocol produced empty output or timed out; reasoning did not complete.",
+        "Answer does not satisfy all rubric constraints based on judge feedback."
+      ]
+    }
+  ]
+}

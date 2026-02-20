@@ -1,0 +1,81 @@
+{
+  "sha": "3244bea6138c",
+  "generation": 1,
+  "parent_sha": "fc395e643a8e",
+  "score": 0.00024625000000000005,
+  "visit_count": 0,
+  "seen_generations": [
+    1
+  ],
+  "eval_count": 1,
+  "last_evaluated_generation": 2,
+  "best_score": 0.00024625000000000005,
+  "last_failure_summary": {
+    "num_tasks": 8,
+    "num_failures": 8,
+    "fitness": 0.16250000000000003,
+    "failure_rate": 1.0,
+    "accuracy": 0.0,
+    "avg_tokens_per_task": 8710.625,
+    "max_tokens_per_task": 18293,
+    "token_efficiency": 0.0,
+    "fitness_token_efficiency": 1.8655377771399876e-05,
+    "verification_failed_count": 2,
+    "attention_drift_mean": null,
+    "attention_drift_high_rate": null,
+    "attention_drift_measured_tasks": 0,
+    "failure_mode_counts": {
+      "F3": 2,
+      "F1": 6
+    },
+    "top_root_causes": [
+      "Answer does not satisfy all rubric constraints based on judge feedback.",
+      "Protocol produced empty output or timed out; reasoning did not complete."
+    ],
+    "top_repair_actions": [
+      "Improve perception granularity for long context sections.",
+      "Add intermediate reasoning checks before final synthesis.",
+      "Add runtime guards and fallback answer path.",
+      "Reduce per-task complexity and LLM call count."
+    ],
+    "top_unsatisfied_rubrics": [
+      "The response should start the message with \"Oh boy, what can I sort today?\"",
+      "The response should place each of the 26 provided reviews into one of 3 categories: \"Positive\" \"Mixed/Neutral\" or \"Negative.\"",
+      "The response should classify as \"Positive\" reviews mentioning primarily positive experiences. For example, the following review should be classified as \"Positive\": \"Lisa was amazing, and the food and size portions wer...",
+      "The response should classify as \"Negative\" reviews mentioning primarily negative experiences or complaints. For example, the following review should be classified as \"Negative\": \"We arrived at the place,\r\na bit gaudy ...",
+      "The response should classify as \"Mixed/Neutral\" reviews stating ambivalence or mentioning a roughly even mix of positive and negative elements. For example, the following review could be classified as \"Mixed/Neutral\":...",
+      "The response should present each of the three lists (Positive, Mixed/Neutral, Negative) in bullet list format.",
+      "The response should use the reviewer's first name only.",
+      "The response should list the first name of each reviewer in bold."
+    ],
+    "compilation_success_rate": 0.875,
+    "execution_success_rate": 0.75,
+    "compilation_failure_count": 1,
+    "execution_failure_count": 2,
+    "top_compilation_errors": [],
+    "top_execution_errors": [
+      "execution failed or timed out"
+    ]
+  },
+  "evaluation_history": [
+    {
+      "generation": 2,
+      "score": 0.00024625000000000005,
+      "num_tasks": 8,
+      "num_failures": 8,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F3": 2,
+        "F1": 6
+      },
+      "top_root_causes": [
+        "Answer does not satisfy all rubric constraints based on judge feedback.",
+        "Protocol produced empty output or timed out; reasoning did not complete."
+      ]
+    }
+  ]
+}
