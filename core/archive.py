@@ -7,7 +7,7 @@ import json
 import math
 import random
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 
 class ProtocolArchive:
@@ -151,10 +151,31 @@ class ProtocolArchive:
         self.db[sha]["visit_count"] = int(self.db[sha].get("visit_count", 0)) + 1
         self._write_meta(sha)
 
-    def select(self, k: int = 5, tau: float = 0.5, alpha: float = 0.5) -> list[str]:
-        """Sample protocols by softmax(score - visit_penalty)."""
+    def select(
+        self,
+        k: int = 5,
+        tau: float = 0.5,
+        alpha: float = 0.5,
+        candidate_shas: Optional[Iterable[str]] = None,
+    ) -> list[str]:
+        """Sample protocols by softmax(score - visit_penalty).
 
-        candidates = [(sha, meta) for sha, meta in self.db.items() if meta.get("score") is not None]
+        Args:
+            k: Number of samples to draw.
+            tau: Softmax temperature (smaller => greedier).
+            alpha: Visit-count penalty weight.
+            candidate_shas: Optional whitelist of SHAs to sample from.
+        """
+
+        allowed: set[str] | None = None
+        if candidate_shas is not None:
+            allowed = {str(sha) for sha in candidate_shas if str(sha)}
+
+        candidates = [
+            (sha, meta)
+            for sha, meta in self.db.items()
+            if meta.get("score") is not None and (allowed is None or sha in allowed)
+        ]
         if not candidates:
             return []
 

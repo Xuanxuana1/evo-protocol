@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import Optional, Union
 
 from core.base_protocol import BaseProtocol
 from core.env_utils import env_float, env_int
-from core.protocol_loader import ProtocolLoader
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
 
 
 def extract_python_code(text: str) -> str:
@@ -51,10 +51,13 @@ def generate_with_repair(
     architect_client,
     architect_model: str,
     architect_prompt: str,
-    loader: ProtocolLoader,
+    loader: Union[ProtocolLoader, SandboxProtocolLoader],
     max_repair_attempts: int = 2,
 ) -> tuple[Optional[BaseProtocol], str]:
-    """Generate protocol code and retry repairs on validation failures."""
+    """Generate protocol code and retry repairs on validation failures.
+
+    Works with both ProtocolLoader (legacy) and SandboxProtocolLoader (CaS).
+    """
 
     try:
         raw = _call_architect(architect_client, architect_model, architect_prompt)

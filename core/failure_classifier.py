@@ -21,6 +21,7 @@ class FailureFeedback:
     judge_rationale: str
     source: str = "heuristic"
     raw_response: Optional[str] = None
+    stage: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert feedback object to plain dictionary."""
@@ -171,11 +172,25 @@ def _infer_default_mode(
     unsatisfied_rubrics: list[str],
     verification_passed: Optional[bool],
     hint_mode: str | None = None,
+    metadata: dict | None = None,
 ) -> str:
-    """Infer initial failure mode from observed behavior instead of task category."""
+    """Infer initial failure mode from observed behavior instead of task category.
+
+    When CaS metadata is present (compilation_failed, execution_traceback),
+    also infers the failure stage.
+    """
 
     hint = _normalize_mode(hint_mode, fallback="F3") if hint_mode else "F3"
     answer = str(model_answer or "").strip()
+
+    # CaS-specific: if compilation failed, the sandbox never existed
+    if metadata and metadata.get("compilation_failed"):
+        return "F2"
+
+    # CaS-specific: execution traceback present -> code generation issue
+    if metadata and metadata.get("execution_traceback"):
+        return "F3"
+
     if not answer:
         # Empty output usually means execution/retrieval collapse rather than category-specific failure.
         return "F2" if (len(context) + len(query)) > 5000 else "F3"
@@ -235,6 +250,21 @@ def _infer_default_mode(
         return "F4"
 
     return hint if hint in {"F1", "F2", "F3", "F4"} else "F3"
+
+
+def _infer_cas_stage(metadata: dict | None) -> str:
+    """Infer CaS failure stage from metadata fields."""
+
+    if not metadata:
+        return ""
+    if metadata.get("compilation_failed"):
+        return "compile"
+    if metadata.get("execution_traceback"):
+        exec_output = str(metadata.get("execution_output", ""))
+        if "NameError" in exec_output or "AttributeError" in exec_output:
+            return "translate"
+        return "execute"
+    return "judge"
 
 
 def classify_failure_mode(
@@ -306,7 +336,10 @@ def build_failure_feedback(
         unsatisfied_rubrics=unsatisfied_rubrics,
         verification_passed=verification_passed,
         hint_mode=hint_mode,
+        metadata=metadata,
     )
+
+    cas_stage = _infer_cas_stage(metadata)
 
     heuristic = _heuristic_feedback(
         context=context,
@@ -317,9 +350,23 @@ def build_failure_feedback(
         judge_rationale=judge_rationale,
         verification_passed=verification_passed,
     )
+    heuristic.stage = cas_stage
 
     if llm_client is None or not answer.strip():
         return heuristic.to_dict()
+
+    cas_context = ""
+    if metadata and (metadata.get("compilation_failed") or metadata.get("execution_traceback") or metadata.get("sandbox_code")):
+        cas_context = (
+            "\n\nCaS (Context-as-Sandbox) failure context:\n"
+            f"- Compilation failed: {metadata.get('compilation_failed', False)}\n"
+            f"- Execution traceback: {_short_text(metadata.get('execution_traceback', ''), 300)}\n"
+            f"- Sandbox code snippet: {_short_text(metadata.get('sandbox_code', ''), 300)}\n"
+            "When sandbox compilation or execution failed, consider stage-specific causes:\n"
+            "- compile: LLM produced invalid Python for context encoding\n"
+            "- translate: LLM produced code referencing wrong namespace keys\n"
+            "- execute: runtime error in query code (type errors, missing data)\n"
+        )
 
     prompt = (
         "You are a failure-analysis model for context-learning protocols.\n"
@@ -337,6 +384,7 @@ def build_failure_feedback(
         f"Unsatisfied rubrics:\n{json.dumps(unsatisfied_rubrics, ensure_ascii=False)}\n\n"
         f"Judge rationale:\n{judge_rationale}\n\n"
         f"Default mode hint: {default_mode}\n"
+        f"{cas_context}"
     )
 
     try:
@@ -391,6 +439,7 @@ def build_failure_feedback(
             judge_rationale=judge_rationale,
             source="llm",
             raw_response=_short_text(raw, 500),
+            stage=cas_stage,
         )
         return feedback.to_dict()
     except Exception as exc:

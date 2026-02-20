@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import Optional, Any
 
 from tqdm import tqdm
 
 from benchmarks.base import TaskRecord, get_benchmark
 from core.base_protocol import BaseProtocol
-from core.protocol_loader import ProtocolLoader
+from core.base_sandbox_protocol import BaseCaSCompiler
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
 
 
 def _build_effective_context(record: TaskRecord) -> str:
@@ -34,22 +35,27 @@ def _build_effective_context(record: TaskRecord) -> str:
     return f"{context}\n\n---\nPrior conversation:\n{suffix}" if context else suffix
 
 
-def _clone_protocol(protocol: BaseProtocol) -> BaseProtocol:
+def _clone_protocol(protocol: Any) -> Any:
     """Clone protocol for parallel workers to avoid shared mutable state."""
 
     try:
-        return protocol.__class__(protocol.llm, protocol.model)
+        cloned = protocol.__class__(protocol.llm, protocol.model)
+        for attr in ("max_llm_calls_per_task", "sandbox_timeout_seconds"):
+            if hasattr(protocol, attr):
+                setattr(cloned, attr, getattr(protocol, attr))
+        return cloned
     except Exception:
         return protocol
 
 
 def run_protocol_on_benchmark(
-    protocol: BaseProtocol,
+    protocol: BaseProtocol | BaseCaSCompiler,
     benchmark_name: str,
     data_path: str,
     split: str = "test",
     output_path: Optional[str] = None,
     benchmark_kwargs: Optional[dict] = None,
+    protocol_loader: Optional[ProtocolLoader | SandboxProtocolLoader] = None,
     judge_client=None,
     workers: int = 1,
 ) -> list[TaskRecord]:
@@ -57,7 +63,10 @@ def run_protocol_on_benchmark(
 
     benchmark = get_benchmark(benchmark_name, **(benchmark_kwargs or {}))
     tasks = benchmark.load_tasks(data_path=data_path, split=split)
-    loader = ProtocolLoader(protocol.llm, protocol.model)
+    if protocol_loader is None:
+        loader: ProtocolLoader | SandboxProtocolLoader = ProtocolLoader(protocol.llm, protocol.model)
+    else:
+        loader = protocol_loader
 
     def process(record: TaskRecord) -> TaskRecord:
         local_protocol = protocol if workers == 1 else _clone_protocol(protocol)

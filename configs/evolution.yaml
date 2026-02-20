@@ -1,4 +1,4 @@
-# Evo-Protocol experiment configuration
+# Evo-Protocol experiment configuration (CaS mode)
 
 benchmark:
   name: cl-bench
@@ -10,6 +10,7 @@ benchmark:
   split_stratify_by: context_category
 
 evolution:
+  mode: cas
   generations: 30
   population_size: 8
   elite_count: 3
@@ -20,6 +21,19 @@ evolution:
   max_repair_attempts: 2
   max_llm_calls_per_task: 10
   timeout_seconds: 300
+  sandbox_timeout_seconds: 30
+  fitness_weights:
+    answer_correctness: 0.6
+    execution_success: 0.2
+    compilation_success: 0.2
+  sandbox_allowed_imports:
+    - pydantic
+    - networkx
+    - enum
+    - datetime
+    - string
+    - operator
+    - abc
   selection:
     tau: 0.5
     alpha: 0.5
@@ -44,6 +58,15 @@ baselines:
   - name: gepa
     type: prompt_evolution
     generations: 30
+  - name: cas_seed
+    type: cas_sandbox
+    description: "Generation-0 CaS seed with general-purpose compilation"
+  - name: cas_naive
+    type: cas_sandbox
+    description: "Flat key-value dict compilation baseline"
+  - name: cas_pydantic
+    type: cas_sandbox
+    description: "Always-Pydantic model compilation baseline"
 
 evaluation:
   judge_model: Pro/MiniMaxAI/MiniMax-M2.5

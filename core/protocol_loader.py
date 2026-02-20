@@ -18,6 +18,7 @@ from typing import Optional
 from typing import Any
 
 from core.base_protocol import BaseProtocol, ProtocolResult
+from core.base_sandbox_protocol import BaseCaSCompiler, BaseSandboxProtocol, SandboxResult
 
 ALLOWED_IMPORTS = {
     "re",
@@ -115,11 +116,13 @@ class ProtocolLoader:
         llm_client,
         model_name: str,
         timeout_seconds: int = 300,
+        max_llm_calls_per_task: int = 10,
         use_process_timeout: bool = True,
     ):
         self.llm_client = llm_client
         self.model_name = model_name
         self.timeout_seconds = timeout_seconds
+        self.max_llm_calls_per_task = max(1, int(max_llm_calls_per_task))
         self._process_ctx = None
         if use_process_timeout:
             try:
@@ -259,7 +262,9 @@ class ProtocolLoader:
 
             for _, obj in inspect.getmembers(module, inspect.isclass):
                 if issubclass(obj, BaseProtocol) and obj is not BaseProtocol:
-                    return obj(self.llm_client, self.model_name)
+                    protocol = obj(self.llm_client, self.model_name)
+                    setattr(protocol, "max_llm_calls_per_task", self.max_llm_calls_per_task)
+                    return protocol
 
         except Exception:
             return None
@@ -276,10 +281,20 @@ class ProtocolLoader:
             return None, error
 
         sha = compute_sha(code)
-        path = Path(tempfile.gettempdir()) / f"evo_protocol_{sha}.py"
-        path.write_text(code, encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=f"_{sha}.py",
+            encoding="utf-8",
+            delete=False,
+        ) as file_obj:
+            file_obj.write(code)
+            temp_path = Path(file_obj.name)
 
-        protocol = self.load_from_file(str(path))
+        try:
+            protocol = self.load_from_file(str(temp_path))
+        finally:
+            temp_path.unlink(missing_ok=True)
+
         if protocol is None:
             return None, ValidationError(
                 stage="load",
@@ -388,6 +403,429 @@ class ProtocolLoader:
                 verification_passed=bool(result_payload.get("verification_passed", False)),
                 tokens_used=int(result_payload.get("tokens_used", 0)),
                 metadata=dict(result_payload.get("metadata", {})),
+            )
+        except Exception:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Sandbox protocol loader (CaS mode)
+# ---------------------------------------------------------------------------
+
+SANDBOX_ALLOWED_IMPORTS = ALLOWED_IMPORTS | {
+    "pydantic",
+    "networkx",
+    "enum",
+    "datetime",
+    "string",
+    "operator",
+    "abc",
+    "core.base_sandbox_protocol",
+}
+
+
+def _serialize_sandbox_result(result: SandboxResult) -> dict[str, Any]:
+    """Serialize SandboxResult to a plain dict for IPC transport."""
+
+    return {
+        "answer": result.answer,
+        "confidence": float(result.confidence),
+        "reasoning_trace": list(result.reasoning_trace),
+        "verification_passed": bool(result.verification_passed),
+        "tokens_used": int(result.tokens_used),
+        "metadata": dict(result.metadata),
+        "sandbox_code": result.sandbox_code,
+        "solver_code": result.solver_code,
+        "execution_output": result.execution_output,
+        "execution_success": bool(result.execution_success),
+        "compilation_success": bool(result.compilation_success),
+    }
+
+
+def _run_sandbox_protocol_in_subprocess(
+    pipe_conn,
+    protocol: BaseCaSCompiler,
+    context: str,
+    query: str,
+) -> None:
+    """Subprocess entrypoint for CaS compiler hard-timeout execution."""
+
+    payload: dict[str, Any]
+    try:
+        result = protocol.run(context, query)
+        payload = {"ok": True, "result": _serialize_sandbox_result(result)}
+    except BaseException as exc:
+        payload = {
+            "ok": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+    try:
+        pipe_conn.send(payload)
+    except Exception:
+        pass
+    finally:
+        pipe_conn.close()
+
+
+class SandboxProtocolLoader:
+    """Validation pipeline + dynamic loader for CaS sandbox protocol code."""
+
+    def __init__(
+        self,
+        llm_client,
+        model_name: str,
+        timeout_seconds: int = 300,
+        sandbox_timeout_seconds: int = 30,
+        max_llm_calls_per_task: int = 10,
+        use_process_timeout: bool = True,
+    ):
+        self.llm_client = llm_client
+        self.model_name = model_name
+        self.timeout_seconds = timeout_seconds
+        self.sandbox_timeout_seconds = max(1, int(sandbox_timeout_seconds))
+        self.max_llm_calls_per_task = max(1, int(max_llm_calls_per_task))
+        self._process_ctx = None
+        if use_process_timeout:
+            try:
+                self._process_ctx = mp.get_context("fork")
+            except ValueError:
+                self._process_ctx = None
+
+    def _check_syntax(self, code: str) -> Optional[ValidationError]:
+        try:
+            ast.parse(code)
+            return None
+        except SyntaxError as exc:
+            return ValidationError(
+                stage="syntax",
+                message=f"Line {exc.lineno}: {exc.msg}",
+                fixable=True,
+            )
+
+    def _check_lint(self, code: str) -> Optional[ValidationError]:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as file_obj:
+            file_obj.write(code)
+            tmp_path = Path(file_obj.name)
+
+        try:
+            result = subprocess.run(
+                [
+                    "ruff",
+                    "check",
+                    str(tmp_path),
+                    "--select",
+                    "F,E,B",
+                    "--output-format",
+                    "text",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                message = (result.stdout or result.stderr).strip()
+                if message:
+                    return ValidationError(stage="lint", message=message, fixable=True)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        return None
+
+    def _check_security(self, code: str) -> Optional[ValidationError]:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if alias.name not in SANDBOX_ALLOWED_IMPORTS and root not in SANDBOX_ALLOWED_IMPORTS:
+                        return ValidationError(
+                            stage="security",
+                            message=f"Forbidden import: {alias.name}",
+                            fixable=True,
+                        )
+                    if root in BANNED_MODULE_NAMES:
+                        return ValidationError(
+                            stage="security",
+                            message=f"Banned module import: {alias.name}",
+                            fixable=True,
+                        )
+
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                root = module.split(".")[0]
+                if module not in SANDBOX_ALLOWED_IMPORTS and root not in SANDBOX_ALLOWED_IMPORTS:
+                    return ValidationError(
+                        stage="security",
+                        message=f"Forbidden import-from: {module}",
+                        fixable=True,
+                    )
+                if root in BANNED_MODULE_NAMES:
+                    return ValidationError(
+                        stage="security",
+                        message=f"Banned module import-from: {module}",
+                        fixable=True,
+                    )
+
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in BANNED_BUILTINS:
+                    return ValidationError(
+                        stage="security",
+                        message=f"Forbidden builtin call: {node.func.id}()",
+                        fixable=True,
+                    )
+                if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                    if node.func.value.id in BANNED_MODULE_NAMES:
+                        return ValidationError(
+                            stage="security",
+                            message=f"Forbidden call through module {node.func.value.id}.",
+                            fixable=True,
+                        )
+
+            if isinstance(node, ast.While):
+                return ValidationError(
+                    stage="security",
+                    message="Forbidden while-loop: use bounded for-loops with explicit max iterations.",
+                    fixable=True,
+                )
+
+        return None
+
+    def _check_cas_contract(self, code: str) -> Optional[ValidationError]:
+        """Enforce that evolved CaS classes only customize compile/solve behavior."""
+
+        tree = ast.parse(code)
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+
+            base_names: set[str] = set()
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    base_names.add(base.id)
+                elif isinstance(base, ast.Attribute):
+                    base_names.add(base.attr)
+
+            if not ({"BaseCaSCompiler", "BaseSandboxProtocol"} & base_names):
+                continue
+
+            methods = {
+                item.name
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+
+            required = {"compile_sandbox", "generate_solver"}
+            missing = sorted(required - methods)
+            if missing:
+                return ValidationError(
+                    stage="contract",
+                    message=f"CaS subclass {node.name} is missing required method(s): {', '.join(missing)}",
+                    fixable=True,
+                )
+
+            forbidden = {"run", "_call_llm", "_make_oracle_fn"}
+            overridden = sorted(forbidden & methods)
+            if overridden:
+                return ValidationError(
+                    stage="contract",
+                    message=(
+                        f"CaS subclass {node.name} overrides immutable runtime method(s): "
+                        f"{', '.join(overridden)}"
+                    ),
+                    fixable=True,
+                )
+
+        return None
+
+    def validate(self, code: str) -> Optional[ValidationError]:
+        """Run all validation stages; return first error if found."""
+
+        for check in (self._check_syntax, self._check_lint, self._check_security, self._check_cas_contract):
+            error = check(code)
+            if error is not None:
+                return error
+        return None
+
+    def load_from_file(self, file_path: str):
+        """Load a CaS compiler subclass from a Python source file."""
+
+        module_name = f"evolved_sandbox_{Path(file_path).stem}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            if spec is None or spec.loader is None:
+                return None
+
+            module = importlib.util.module_from_spec(spec)
+            module.BaseCaSCompiler = BaseCaSCompiler
+            module.BaseSandboxProtocol = BaseSandboxProtocol
+            module.SandboxResult = SandboxResult
+            module.Any = Any
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if issubclass(obj, BaseCaSCompiler) and obj is not BaseCaSCompiler:
+                    protocol = obj(self.llm_client, self.model_name)
+                    setattr(protocol, "sandbox_timeout_seconds", self.sandbox_timeout_seconds)
+                    setattr(protocol, "max_llm_calls_per_task", self.max_llm_calls_per_task)
+                    return protocol
+
+        except Exception:
+            return None
+        finally:
+            sys.modules.pop(module_name, None)
+
+        return None
+
+    def load_from_code(self, code: str) -> tuple[Optional[BaseCaSCompiler], Optional[ValidationError]]:
+        """Validate and load CaS compiler from source code string."""
+
+        error = self.validate(code)
+        if error is not None:
+            return None, error
+
+        sha = compute_sha(code)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=f"_{sha}.py",
+            encoding="utf-8",
+            delete=False,
+        ) as file_obj:
+            file_obj.write(code)
+            temp_path = Path(file_obj.name)
+
+        try:
+            protocol = self.load_from_file(str(temp_path))
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        if protocol is None:
+            return None, ValidationError(
+                stage="load",
+                message="No valid BaseCaSCompiler subclass could be loaded.",
+                fixable=True,
+            )
+
+        return protocol, None
+
+    def run_with_timeout(
+        self,
+        protocol: BaseCaSCompiler,
+        context: str,
+        query: str,
+    ) -> Optional[SandboxResult]:
+        """Run sandbox protocol with hard subprocess timeout when available."""
+
+        if self._process_ctx is not None:
+            result = self._run_with_process_timeout(protocol, context, query)
+            if result is not None:
+                return result
+            return None
+
+        return self._run_with_thread_timeout(protocol, context, query)
+
+    def _run_with_thread_timeout(
+        self,
+        protocol: BaseCaSCompiler,
+        context: str,
+        query: str,
+    ) -> Optional[SandboxResult]:
+        """Fallback timeout mode using daemon thread join."""
+
+        result_box: dict[str, SandboxResult] = {}
+        error_box: dict[str, BaseException] = {}
+
+        def _target() -> None:
+            try:
+                result_box["result"] = protocol.run(context, query)
+            except BaseException as exc:
+                error_box["error"] = exc
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        thread.join(timeout=self.timeout_seconds)
+
+        if thread.is_alive():
+            return None
+
+        if "error" in error_box:
+            error = error_box["error"]
+            traceback.print_exception(type(error), error, error.__traceback__)
+            return None
+
+        return result_box.get("result")
+
+    def _run_with_process_timeout(
+        self,
+        protocol: BaseCaSCompiler,
+        context: str,
+        query: str,
+    ) -> Optional[SandboxResult]:
+        """Execute task in child process and force-kill on timeout."""
+
+        assert self._process_ctx is not None
+        parent_conn, child_conn = self._process_ctx.Pipe(duplex=False)
+        process = self._process_ctx.Process(
+            target=_run_sandbox_protocol_in_subprocess,
+            args=(child_conn, protocol, context, query),
+            daemon=True,
+        )
+
+        try:
+            process.start()
+        except Exception:
+            parent_conn.close()
+            child_conn.close()
+            return self._run_with_thread_timeout(protocol, context, query)
+        finally:
+            child_conn.close()
+
+        process.join(timeout=self.timeout_seconds)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+            parent_conn.close()
+            return None
+
+        payload: dict[str, Any] | None = None
+        try:
+            if parent_conn.poll(0.2):
+                payload = parent_conn.recv()
+        except (EOFError, OSError):
+            payload = None
+        finally:
+            parent_conn.close()
+
+        if not payload:
+            return None
+        if not bool(payload.get("ok")):
+            error_tb = str(payload.get("traceback") or payload.get("error") or "").strip()
+            if error_tb:
+                print(error_tb, file=sys.stderr)
+            return None
+
+        result_payload = payload.get("result", {})
+        if not isinstance(result_payload, dict):
+            return None
+        try:
+            return SandboxResult(
+                answer=str(result_payload.get("answer", "")),
+                confidence=float(result_payload.get("confidence", 0.0)),
+                reasoning_trace=list(result_payload.get("reasoning_trace", [])),
+                verification_passed=bool(result_payload.get("verification_passed", False)),
+                tokens_used=int(result_payload.get("tokens_used", 0)),
+                metadata=dict(result_payload.get("metadata", {})),
+                sandbox_code=str(result_payload.get("sandbox_code", "")),
+                solver_code=str(result_payload.get("solver_code", "")),
+                execution_output=str(result_payload.get("execution_output", "")),
+                execution_success=bool(result_payload.get("execution_success", False)),
+                compilation_success=bool(result_payload.get("compilation_success", False)),
             )
         except Exception:
             return None

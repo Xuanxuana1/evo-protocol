@@ -7,6 +7,7 @@ import argparse
 from openai import OpenAI
 
 from baselines import CoTProtocol, NaiveProtocol, ReActProtocol
+from baselines import SeedCaSCompiler, NaiveCaSCompiler, PydanticCaSCompiler
 from core.env_utils import env_float, first_env, load_env_file
 from core.evaluator import print_metrics, run_protocol_on_benchmark
 
@@ -15,6 +16,9 @@ BASELINE_REGISTRY = {
     "naive": NaiveProtocol,
     "cot": CoTProtocol,
     "react": ReActProtocol,
+    "cas_seed": SeedCaSCompiler,
+    "cas_naive": NaiveCaSCompiler,
+    "cas_pydantic": PydanticCaSCompiler,
 }
 
 

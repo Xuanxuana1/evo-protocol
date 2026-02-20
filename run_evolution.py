@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -11,20 +12,22 @@ from typing import Any
 from openai import OpenAI
 
 from baselines.naive import NaiveProtocol
+from baselines.cas_seed import SeedCaSCompiler
 from benchmarks import get_benchmark
 from core.archive import ProtocolArchive
 from core.env_utils import env_float, first_env, load_env_file
 from core.evaluator import run_protocol_on_benchmark
 from core.evolution_loop import EvolutionConfig, EvolutionEngine
 from core.meta_architect import MetaArchitect
-from core.protocol_loader import ProtocolLoader
+from core.protocol_loader import ProtocolLoader, SandboxProtocolLoader
 
 
-def load_initial_code(path: str | None) -> str:
+def load_initial_code(path: str | None, mode: str = "cas") -> str:
     if path:
         return Path(path).read_text(encoding="utf-8")
 
-    import inspect
+    if mode == "cas":
+        return inspect.getsource(SeedCaSCompiler)
 
     return inspect.getsource(NaiveProtocol)
 
@@ -71,9 +74,11 @@ def main() -> None:
         action="store_true",
         help="Ignore config file and use only CLI args + env vars",
     )
+    parser.add_argument("--mode", default="cas", choices=["cas", "legacy"], help="Evolution mode: cas (Context-as-Sandbox) or legacy")
     parser.add_argument("--benchmark", default="cl-bench", help="Benchmark registry key")
     parser.add_argument("--data-path", default="data/CL-bench.jsonl", help="Benchmark dataset path")
     parser.add_argument("--split", default="train", choices=["train", "val", "test", "all"], help="Data split")
+    parser.add_argument("--split-seed", type=int, default=42, help="Deterministic benchmark split seed")
     parser.add_argument("--initial-code", default=None, help="Path to initial protocol .py")
     parser.add_argument("--worker-model", default=None, help="Model used inside protocols")
     parser.add_argument("--architect-model", default=None, help="Model used for protocol mutation")
@@ -86,8 +91,10 @@ def main() -> None:
     parser.add_argument("--population-size", type=int, default=4)
     parser.add_argument("--elite-count", type=int, default=2)
     parser.add_argument("--tasks-per-eval", type=int, default=20)
+    parser.add_argument("--failure-samples-per-mutation", type=int, default=5)
     parser.add_argument("--archive-dir", default="archive")
     parser.add_argument("--max-repair-attempts", type=int, default=2)
+    parser.add_argument("--max-llm-calls-per-task", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default="outputs/evolution_result.json", help="Where to save final summary")
     parser.add_argument("--skip-final-eval", action="store_true", help="Skip final evaluation of best protocol")
@@ -99,6 +106,9 @@ def main() -> None:
     parser.add_argument("--api-key", default=None, help="API key (fallback to OPENAI_API_KEY)")
     parser.add_argument("--api-timeout", type=float, default=None, help="Per-request API timeout in seconds")
     parser.add_argument("--protocol-timeout", type=int, default=300, help="Protocol hard timeout in seconds")
+    parser.add_argument("--sandbox-timeout", type=int, default=30, help="Sandbox code execution timeout in seconds")
+    parser.add_argument("--selection-tau", type=float, default=0.5, help="Parent-selection temperature (lower is greedier)")
+    parser.add_argument("--selection-alpha", type=float, default=0.5, help="Parent-selection visit-count penalty weight")
     parser.add_argument("--attention-drift-sample-rate", type=float, default=1.0, help="Sample rate in [0,1] for attention-drift scoring")
     args = parser.parse_args()
 
@@ -124,19 +134,36 @@ def main() -> None:
 
     load_env_file(args.env_file)
 
+    mode = str(resolve_cli_or_config("mode", evolution_cfg.get("mode")))
+    if mode not in ("cas", "legacy"):
+        mode = "cas"
+
     benchmark_name = str(resolve_cli_or_config("benchmark", benchmark_cfg.get("name")))
     data_path = str(resolve_cli_or_config("data_path", benchmark_cfg.get("data_path")))
     split = str(resolve_cli_or_config("split", benchmark_cfg.get("split")))
+    split_seed = int(resolve_cli_or_config("split_seed", benchmark_cfg.get("split_seed")))
     generations = int(resolve_cli_or_config("generations", evolution_cfg.get("generations")))
     population_size = int(resolve_cli_or_config("population_size", evolution_cfg.get("population_size")))
     elite_count = int(resolve_cli_or_config("elite_count", evolution_cfg.get("elite_count")))
     tasks_per_eval = int(resolve_cli_or_config("tasks_per_eval", evolution_cfg.get("tasks_per_evaluation")))
+    failure_samples_per_mutation = int(
+        resolve_cli_or_config("failure_samples_per_mutation", evolution_cfg.get("failure_samples_per_mutation"))
+    )
     archive_dir = str(resolve_cli_or_config("archive_dir", evolution_cfg.get("archive_dir")))
     max_repair_attempts = int(resolve_cli_or_config("max_repair_attempts", evolution_cfg.get("max_repair_attempts")))
+    max_llm_calls_per_task = int(
+        resolve_cli_or_config("max_llm_calls_per_task", evolution_cfg.get("max_llm_calls_per_task"))
+    )
     seed = int(resolve_cli_or_config("seed", evolution_cfg.get("seed")))
     final_eval_split = str(resolve_cli_or_config("final_eval_split", evaluation_cfg.get("final_eval_split")))
     final_eval_workers = int(resolve_cli_or_config("final_eval_workers", evaluation_cfg.get("workers")))
     protocol_timeout = int(resolve_cli_or_config("protocol_timeout", evolution_cfg.get("timeout_seconds")))
+    sandbox_timeout = int(resolve_cli_or_config("sandbox_timeout", evolution_cfg.get("sandbox_timeout_seconds")))
+    selection_cfg = evolution_cfg.get("selection", {})
+    if not isinstance(selection_cfg, dict):
+        selection_cfg = {}
+    selection_tau = float(resolve_cli_or_config("selection_tau", selection_cfg.get("tau")))
+    selection_alpha = float(resolve_cli_or_config("selection_alpha", selection_cfg.get("alpha")))
 
     worker_model = (
         resolve_cli_or_config("worker_model", evolution_cfg.get("worker_model"))
@@ -184,6 +211,16 @@ def main() -> None:
     if not disable_attention_flag_provided:
         disable_attention_drift = not bool(evaluation_cfg.get("enable_attention_drift", True))
 
+    # Fitness weights for CaS mode
+    fitness_weights_cfg = evolution_cfg.get("fitness_weights", {})
+    if not isinstance(fitness_weights_cfg, dict):
+        fitness_weights_cfg = {}
+    fitness_weights = {
+        "answer_correctness": float(fitness_weights_cfg.get("answer_correctness", 0.6)),
+        "execution_success": float(fitness_weights_cfg.get("execution_success", 0.2)),
+        "compilation_success": float(fitness_weights_cfg.get("compilation_success", 0.2)),
+    }
+
     base_url = args.base_url or first_env(["OPENAI_BASE_URL", "BASE_URL", "OPENAI_API_BASE"])
     api_key = args.api_key or first_env(["OPENAI_API_KEY", "API_KEY"])
     api_timeout = (
@@ -206,14 +243,46 @@ def main() -> None:
     judge_client = OpenAI(**client_kwargs)
 
     archive = ProtocolArchive(archive_dir)
-    loader = ProtocolLoader(worker_client, worker_model, timeout_seconds=protocol_timeout)
-    architect = MetaArchitect(architect_client, architect_model=architect_model)
+
+    benchmark_kwargs: dict[str, Any] = {"judge_model": judge_model, "split_seed": split_seed}
+    split_ratio_cfg = benchmark_cfg.get("split_ratio")
+    if isinstance(split_ratio_cfg, dict):
+        parsed_split_ratio: dict[str, float] = {}
+        for key in ("train", "val", "test"):
+            if key not in split_ratio_cfg:
+                continue
+            try:
+                parsed_split_ratio[key] = float(split_ratio_cfg[key])
+            except (TypeError, ValueError):
+                continue
+        if parsed_split_ratio:
+            benchmark_kwargs["split_ratio"] = parsed_split_ratio
+
+    # Use SandboxProtocolLoader for CaS mode, ProtocolLoader for legacy
+    if mode == "cas":
+        loader = SandboxProtocolLoader(
+            worker_client,
+            worker_model,
+            timeout_seconds=protocol_timeout,
+            sandbox_timeout_seconds=sandbox_timeout,
+            max_llm_calls_per_task=max_llm_calls_per_task,
+        )
+    else:
+        loader = ProtocolLoader(
+            worker_client,
+            worker_model,
+            timeout_seconds=protocol_timeout,
+            max_llm_calls_per_task=max_llm_calls_per_task,
+        )
+
+    architect = MetaArchitect(architect_client, architect_model=architect_model, mode=mode)
 
     config = EvolutionConfig(
         generations=generations,
         population_size=population_size,
         elite_count=elite_count,
         tasks_per_evaluation=tasks_per_eval,
+        failure_samples_per_mutation=failure_samples_per_mutation,
         enable_failure_classifier=not disable_failure_classifier,
         failure_classifier_model=failure_classifier_model,
         enable_attention_drift=not disable_attention_drift,
@@ -221,6 +290,11 @@ def main() -> None:
         attention_drift_sample_rate=attention_drift_sample_rate,
         max_repair_attempts=max_repair_attempts,
         seed=seed,
+        mode=mode,
+        sandbox_timeout_seconds=sandbox_timeout,
+        selection_tau=selection_tau,
+        selection_alpha=selection_alpha,
+        fitness_weights=fitness_weights,
     )
 
     engine = EvolutionEngine(
@@ -231,14 +305,15 @@ def main() -> None:
         meta_architect=architect,
         archive=archive,
         config=config,
-        benchmark_kwargs={"judge_model": judge_model},
+        benchmark_kwargs=benchmark_kwargs,
         judge_client=judge_client,
         failure_classifier_client=judge_client,
     )
 
     if config_doc:
         print(f"Loaded config: {args.config}")
-    initial_code = load_initial_code(args.initial_code)
+    print(f"Evolution mode: {mode}")
+    initial_code = load_initial_code(args.initial_code, mode=mode)
     summary = engine.run(initial_code=initial_code)
     log_files = summary.get("log_files", {})
     if isinstance(log_files, dict) and log_files:
@@ -254,7 +329,6 @@ def main() -> None:
             err_msg = load_error.message if load_error else "unknown"
             raise RuntimeError(f"Failed to load best protocol {best_sha}: {err_msg}")
 
-        benchmark_kwargs = {"judge_model": judge_model}
         records = run_protocol_on_benchmark(
             protocol=best_protocol,
             benchmark_name=benchmark_name,
@@ -262,6 +336,7 @@ def main() -> None:
             split=final_eval_split,
             output_path=args.final_eval_output,
             benchmark_kwargs=benchmark_kwargs,
+            protocol_loader=loader,
             judge_client=judge_client,
             workers=final_eval_workers,
         )
