@@ -19,6 +19,8 @@ class ProtocolResult:
     reasoning_trace: list[str] = field(default_factory=list)
     verification_passed: bool = False
     tokens_used: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -32,6 +34,8 @@ class BaseProtocol(ABC):
         self.model = model_name
         self._call_count = 0
         self._task_tokens_used = 0
+        self._task_prompt_tokens = 0
+        self._task_completion_tokens = 0
         self.api_timeout_seconds = env_float(
             ["WORKER_API_TIMEOUT_SECONDS", "OPENAI_API_TIMEOUT_SECONDS", "OPENAI_API_TIMEOUT", "API_TIMEOUT_SECONDS"],
             default=90.0,
@@ -58,6 +62,8 @@ class BaseProtocol(ABC):
 
         self._call_count = 0
         self._task_tokens_used = 0
+        self._task_prompt_tokens = 0
+        self._task_completion_tokens = 0
         trace: list[str] = []
 
         perceived = self.perception(context)
@@ -82,6 +88,8 @@ class BaseProtocol(ABC):
                     reasoning_trace=trace,
                     verification_passed=True,
                     tokens_used=self._task_tokens_used,
+                    prompt_tokens=self._task_prompt_tokens,
+                    completion_tokens=self._task_completion_tokens,
                     metadata={"attempts": attempt + 1, "llm_calls": self._call_count},
                 )
 
@@ -94,6 +102,8 @@ class BaseProtocol(ABC):
             reasoning_trace=trace,
             verification_passed=False,
             tokens_used=self._task_tokens_used,
+            prompt_tokens=self._task_prompt_tokens,
+            completion_tokens=self._task_completion_tokens,
             metadata={
                 "attempts": max_retries + 1,
                 "llm_calls": self._call_count,
@@ -122,6 +132,8 @@ class BaseProtocol(ABC):
         if usage is not None:
             prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
             completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            self._task_prompt_tokens += prompt_tokens
+            self._task_completion_tokens += completion_tokens
             self._task_tokens_used += prompt_tokens + completion_tokens
             TRACKER.record(self.model, prompt_tokens, completion_tokens)
 

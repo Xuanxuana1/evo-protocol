@@ -135,6 +135,8 @@ class BaseCaSCompiler(ABC):
         self.model = model_name
         self._call_count = 0
         self._task_tokens_used = 0
+        self._task_prompt_tokens = 0
+        self._task_completion_tokens = 0
         self._oracle_call_count = 0
         self._max_llm_calls_current = int(getattr(self, "max_llm_calls_per_task", 20))
         self.api_timeout_seconds = env_float(
@@ -211,6 +213,8 @@ class BaseCaSCompiler(ABC):
 
         self._call_count = 0
         self._task_tokens_used = 0
+        self._task_prompt_tokens = 0
+        self._task_completion_tokens = 0
         self._oracle_call_count = 0
         self._max_llm_calls_current = self._derive_dynamic_call_budget(context=context, query=query)
         trace: list[str] = []
@@ -261,6 +265,8 @@ class BaseCaSCompiler(ABC):
                 reasoning_trace=trace,
                 verification_passed=False,
                 tokens_used=self._task_tokens_used,
+                prompt_tokens=self._task_prompt_tokens,
+                completion_tokens=self._task_completion_tokens,
                 metadata={"stage": "compile", "llm_calls": self._call_count},
                 sandbox_code=env_code,
                 solver_code="",
@@ -328,6 +334,8 @@ class BaseCaSCompiler(ABC):
                     reasoning_trace=trace,
                     verification_passed=True,
                     tokens_used=self._task_tokens_used,
+                    prompt_tokens=self._task_prompt_tokens,
+                    completion_tokens=self._task_completion_tokens,
                     metadata={
                         "stage": "execute",
                         "attempts": attempt + 1,
@@ -359,6 +367,8 @@ class BaseCaSCompiler(ABC):
                 reasoning_trace=trace,
                 verification_passed=True,
                 tokens_used=self._task_tokens_used,
+                prompt_tokens=self._task_prompt_tokens,
+                completion_tokens=self._task_completion_tokens,
                 metadata={
                     "stage": "fallback",
                     "attempts": max_retries + 1,
@@ -379,6 +389,8 @@ class BaseCaSCompiler(ABC):
             reasoning_trace=trace,
             verification_passed=False,
             tokens_used=self._task_tokens_used,
+            prompt_tokens=self._task_prompt_tokens,
+            completion_tokens=self._task_completion_tokens,
             metadata={
                 "stage": "execute",
                 "attempts": max_retries + 1,
@@ -470,6 +482,8 @@ class BaseCaSCompiler(ABC):
         if usage is not None:
             prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
             completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            self._task_prompt_tokens += prompt_tokens
+            self._task_completion_tokens += completion_tokens
             self._task_tokens_used += prompt_tokens + completion_tokens
             TRACKER.record(self.model, prompt_tokens, completion_tokens)
 
@@ -654,6 +668,8 @@ class BaseCaSCompiler(ABC):
             if usage is not None:
                 pt = int(getattr(usage, "prompt_tokens", 0) or 0)
                 ct = int(getattr(usage, "completion_tokens", 0) or 0)
+                self._task_prompt_tokens += pt
+                self._task_completion_tokens += ct
                 self._task_tokens_used += pt + ct
                 TRACKER.record(self.model, pt, ct)
 

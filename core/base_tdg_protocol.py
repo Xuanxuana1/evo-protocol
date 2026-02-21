@@ -175,6 +175,8 @@ class BaseTDGCompiler(ABC):
         self.model = model_name
         self._call_count = 0
         self._task_tokens_used = 0
+        self._task_prompt_tokens = 0
+        self._task_completion_tokens = 0
         self._oracle_call_count = 0
         self._max_llm_calls_current = int(getattr(self, "max_llm_calls_per_task", 20))
         self.api_timeout_seconds = env_float(
@@ -254,6 +256,8 @@ class BaseTDGCompiler(ABC):
 
         self._call_count = 0
         self._task_tokens_used = 0
+        self._task_prompt_tokens = 0
+        self._task_completion_tokens = 0
         self._oracle_call_count = 0
         self._max_llm_calls_current = self._derive_dynamic_call_budget(context=context, query=query)
         trace: list[str] = []
@@ -340,6 +344,8 @@ class BaseTDGCompiler(ABC):
                 reasoning_trace=trace,
                 verification_passed=bool(draft),
                 tokens_used=self._task_tokens_used,
+                prompt_tokens=self._task_prompt_tokens,
+                completion_tokens=self._task_completion_tokens,
                 metadata={
                     "stage": "no_tests",
                     "llm_calls": self._call_count,
@@ -407,6 +413,8 @@ class BaseTDGCompiler(ABC):
             reasoning_trace=trace,
             verification_passed=all_passed,
             tokens_used=self._task_tokens_used,
+            prompt_tokens=self._task_prompt_tokens,
+            completion_tokens=self._task_completion_tokens,
             metadata={
                 "stage": "verified" if all_passed else "partial_pass",
                 "llm_calls": self._call_count,
@@ -598,6 +606,8 @@ class BaseTDGCompiler(ABC):
         if usage is not None:
             prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
             completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            self._task_prompt_tokens += prompt_tokens
+            self._task_completion_tokens += completion_tokens
             self._task_tokens_used += prompt_tokens + completion_tokens
             TRACKER.record(self.model, prompt_tokens, completion_tokens)
 
@@ -781,6 +791,8 @@ class BaseTDGCompiler(ABC):
             if usage is not None:
                 pt = int(getattr(usage, "prompt_tokens", 0) or 0)
                 ct = int(getattr(usage, "completion_tokens", 0) or 0)
+                self._task_prompt_tokens += pt
+                self._task_completion_tokens += ct
                 self._task_tokens_used += pt + ct
                 TRACKER.record(self.model, pt, ct)
 

@@ -6,8 +6,9 @@ import copy
 import json
 import random
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from time import perf_counter
@@ -95,6 +96,7 @@ class EvolutionEngine:
         self.candidate_trace_path = self.logs_dir / "candidate_trace.jsonl"
         self.failure_trace_path = self.logs_dir / "failure_trace.jsonl"
         self.task_trace_path = self.logs_dir / "task_trace.jsonl"
+        self._log_lock = threading.Lock()
 
     @property
     def _is_cas(self) -> bool:
@@ -164,15 +166,65 @@ class EvolutionEngine:
             sampled_tasks = self._sample_tasks(self.config.tasks_per_evaluation)
             generation_eval_cache: dict[str, tuple[float, dict[str, float], list[dict[str, Any]], dict[str, Any], int]] = {}
 
+            # Phase 1 (parallel): evaluate each unique candidate code once.
+            # Duplicated elite clones (same SHA) reuse the same evaluation result.
+            future_to_meta: dict[Any, dict[str, Any]] = {}
+            scheduled_eval_keys: set[str] = set()
+            with ThreadPoolExecutor(max_workers=max(1, len(population))) as eval_pool:
+                for idx, candidate in enumerate(population, start=1):
+                    candidate_sha = str(candidate.get("sha", ""))
+                    eval_key = candidate_sha if candidate_sha else f"__idx_{idx}"
+                    if eval_key in scheduled_eval_keys:
+                        continue
+                    scheduled_eval_keys.add(eval_key)
+                    future = eval_pool.submit(
+                        self._evaluate_protocol,
+                        protocol=candidate["protocol"],
+                        generation=generation,
+                        candidate_index=idx,
+                        candidate_total=len(population),
+                        candidate_sha=candidate_sha,
+                        sampled_tasks=sampled_tasks,
+                    )
+                    future_to_meta[future] = {
+                        "eval_key": eval_key,
+                        "source_candidate_index": idx,
+                        "sha": candidate_sha,
+                    }
+
+                for future in as_completed(future_to_meta):
+                    meta = future_to_meta[future]
+                    try:
+                        fitness, mode_accuracy, failures, eval_summary = future.result()
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        sha_text = str(meta.get("sha", ""))[:12] or "<no_sha>"
+                        raise RuntimeError(
+                            f"[Gen {generation}] candidate evaluation failed for sha={sha_text}: {exc}"
+                        ) from exc
+                    generation_eval_cache[str(meta["eval_key"])] = (
+                        float(fitness),
+                        dict(copy.deepcopy(mode_accuracy)),
+                        list(copy.deepcopy(failures)),
+                        dict(copy.deepcopy(eval_summary)),
+                        int(meta["source_candidate_index"]),
+                    )
+
+            # Phase 2 (serial): update archive/logs/population in deterministic order.
             for idx, candidate in enumerate(population, start=1):
                 candidate_sha = str(candidate.get("sha", ""))
-                cached_eval = generation_eval_cache.get(candidate_sha) if candidate_sha else None
-                if cached_eval is not None:
-                    fitness, mode_accuracy, failures, eval_summary, source_idx = cached_eval
-                    fitness = float(fitness)
-                    mode_accuracy = dict(copy.deepcopy(mode_accuracy))
-                    failures = list(copy.deepcopy(failures))
-                    eval_summary = dict(copy.deepcopy(eval_summary))
+                eval_key = candidate_sha if candidate_sha else f"__idx_{idx}"
+                cached_eval = generation_eval_cache.get(eval_key)
+                if cached_eval is None:
+                    raise RuntimeError(
+                        f"[Gen {generation}] missing evaluation result for candidate {idx} sha={candidate_sha!r}"
+                    )
+
+                fitness, mode_accuracy, failures, eval_summary, source_idx = cached_eval
+                fitness = float(fitness)
+                mode_accuracy = dict(copy.deepcopy(mode_accuracy))
+                failures = list(copy.deepcopy(failures))
+                eval_summary = dict(copy.deepcopy(eval_summary))
+                if candidate_sha and source_idx != idx:
                     print(
                         f"[Gen {generation}] candidate {idx}/{len(population)} "
                         f"sha={candidate_sha} reusing eval from cand {source_idx}"
@@ -189,23 +241,6 @@ class EvolutionEngine:
                             "sha": candidate_sha,
                         },
                     )
-                else:
-                    fitness, mode_accuracy, failures, eval_summary = self._evaluate_protocol(
-                        protocol=candidate["protocol"],
-                        generation=generation,
-                        candidate_index=idx,
-                        candidate_total=len(population),
-                        candidate_sha=candidate_sha,
-                        sampled_tasks=sampled_tasks,
-                    )
-                    if candidate_sha:
-                        generation_eval_cache[candidate_sha] = (
-                            float(fitness),
-                            dict(copy.deepcopy(mode_accuracy)),
-                            list(copy.deepcopy(failures)),
-                            dict(copy.deepcopy(eval_summary)),
-                            idx,
-                        )
                 candidate["fitness"] = fitness
                 candidate["mode_accuracy"] = mode_accuracy
                 candidate["failures"] = failures
@@ -313,6 +348,47 @@ class EvolutionEngine:
             last_rejection_reason = ""
             same_rejection_streak = 0
             max_same_rejection = max(1, int(getattr(self.config, "mutation_max_same_rejection", 3)))
+            # Adaptive architect temperature: raise when mutations collapse into
+            # duplicate children, cool down after successful novelty.
+            adaptive_temp_enabled = env_int(
+                ["EVO_ADAPTIVE_ARCH_TEMP", "ADAPTIVE_ARCH_TEMP"],
+                default=1,
+            ) > 0
+            base_arch_temp = env_float(
+                ["ARCHITECT_TEMPERATURE", "EVO_ARCHITECT_TEMPERATURE"],
+                default=0.25,
+            )
+            repair_arch_temp = env_float(
+                ["ARCHITECT_REPAIR_TEMPERATURE", "EVO_ARCHITECT_REPAIR_TEMPERATURE"],
+                default=0.05,
+            )
+            arch_temp_step = env_float(
+                ["EVO_ARCH_TEMP_STEP", "ARCH_TEMP_STEP"],
+                default=0.05,
+            )
+            arch_temp_max = env_float(
+                ["EVO_ARCH_TEMP_MAX", "ARCH_TEMP_MAX"],
+                default=0.45,
+            )
+            dup_trigger = max(
+                1,
+                env_int(["EVO_ARCH_TEMP_DUP_TRIGGER", "ARCH_TEMP_DUP_TRIGGER"], default=2),
+            )
+            arch_temp_cooldown = env_float(
+                ["EVO_ARCH_TEMP_COOLDOWN_STEP", "ARCH_TEMP_COOLDOWN_STEP"],
+                default=0.03,
+            )
+            dup_window_size = max(
+                1,
+                env_int(["EVO_ARCH_TEMP_DUP_WINDOW", "ARCH_TEMP_DUP_WINDOW"], default=6),
+            )
+            dup_rate_trigger = env_float(
+                ["EVO_ARCH_TEMP_DUP_RATE_TRIGGER", "ARCH_TEMP_DUP_RATE_TRIGGER"],
+                default=0.6,
+            )
+            current_arch_temp = base_arch_temp
+            duplicate_streak = 0
+            recent_duplicate_window: deque[int] = deque(maxlen=dup_window_size)
             for item in elites:
                 sha = str(item.get("sha", "")).strip()
                 if sha and sha not in elite_by_sha:
@@ -386,8 +462,10 @@ class EvolutionEngine:
                         attempt_id = mutation_attempts
                         print(
                             f"[Gen {generation}] mutate attempt {attempt_id}/{max_attempts} "
-                            f"parent={str(parent.get('sha', 'unknown'))[:12]}"
+                            f"parent={str(parent.get('sha', 'unknown'))[:12]} "
+                            f"temp={current_arch_temp:.2f}"
                         )
+                        submitted_temp = float(current_arch_temp)
                         future = mutation_pool.submit(
                             self.meta_architect.mutate,
                             loader=self.loader,
@@ -397,10 +475,13 @@ class EvolutionEngine:
                             parent_performance=parent_perf,
                             failure_examples=sampled_failures,
                             max_repair_attempts=self.config.max_repair_attempts,
+                            architect_temperature=submitted_temp,
+                            repair_temperature=repair_arch_temp,
                         )
                         futures_to_meta[future] = {
                             "parent": parent,
                             "attempt_id": attempt_id,
+                            "temperature": submitted_temp,
                         }
 
                     remaining_budget = max(0.0, mutation_deadline - perf_counter())
@@ -417,6 +498,7 @@ class EvolutionEngine:
                             if child_protocol is None:
                                 reason = str(child_code_or_err)[:320]
                                 normalized_reason = re.sub(r"\s+", " ", reason).strip()
+                                recent_duplicate_window.append(0)
                                 if normalized_reason and normalized_reason == last_rejection_reason:
                                     same_rejection_streak += 1
                                 else:
@@ -430,6 +512,7 @@ class EvolutionEngine:
                                         "time": self._now_iso(),
                                         "generation": generation,
                                         "parent_sha": parent["sha"],
+                                        "temperature": float(meta.get("temperature", current_arch_temp)),
                                         "reason": reason,
                                     },
                                 )
@@ -462,6 +545,8 @@ class EvolutionEngine:
                                 parent_sha=parent["sha"],
                             )
                             if child_sha in existing_child_shas:
+                                recent_duplicate_window.append(1)
+                                duplicate_streak += 1
                                 self._append_jsonl(
                                     self.generation_trace_path,
                                     {
@@ -470,11 +555,24 @@ class EvolutionEngine:
                                         "time": self._now_iso(),
                                         "generation": generation,
                                         "parent_sha": parent["sha"],
+                                        "temperature": float(meta.get("temperature", current_arch_temp)),
                                         "child_sha": child_sha,
                                     },
                                 )
                                 print(f"[Gen {generation}] mutation duplicate child={child_sha}; retrying")
+                                if adaptive_temp_enabled:
+                                    duplicate_ratio = sum(recent_duplicate_window) / max(1, len(recent_duplicate_window))
+                                    if duplicate_streak >= dup_trigger or duplicate_ratio >= dup_rate_trigger:
+                                        new_temp = min(arch_temp_max, current_arch_temp + arch_temp_step)
+                                        if new_temp > current_arch_temp + 1e-9:
+                                            current_arch_temp = new_temp
+                                            print(
+                                                f"[Gen {generation}] duplicate pressure -> bump architect temp "
+                                                f"to {current_arch_temp:.2f}"
+                                            )
                                 continue
+                            recent_duplicate_window.append(0)
+                            duplicate_streak = 0
                             existing_child_shas.add(child_sha)
                             new_population.append(
                                 {
@@ -489,6 +587,8 @@ class EvolutionEngine:
                                 }
                             )
                             print(f"[Gen {generation}] mutation accepted child={child_sha}")
+                            if adaptive_temp_enabled and current_arch_temp > base_arch_temp:
+                                current_arch_temp = max(base_arch_temp, current_arch_temp - arch_temp_cooldown)
                             if len(new_population) >= self.config.population_size:
                                 stop_mutation = True
                     except FuturesTimeoutError:
@@ -581,6 +681,7 @@ class EvolutionEngine:
         test_pass_rate_values: list[float] = []
         sanitized_test_drop_count_total = 0
         raw_test_count_total = 0
+        task_rng = random.Random(f"{self.config.seed}:{generation}:{candidate_sha}:{candidate_index}")
 
         for task_idx, task in enumerate(sampled, start=1):
             record = TaskRecord(
@@ -641,6 +742,11 @@ class EvolutionEngine:
                 record.model_output = ""
                 record.reasoning_trace = ["execution failed or timed out"]
                 record.verification_passed = False
+                record.tokens_used = 0
+                record.prompt_tokens = 0
+                record.completion_tokens = 0
+                record.metadata["prompt_tokens"] = 0
+                record.metadata["completion_tokens"] = 0
                 worker_status = "timeout_or_error"
                 if self._is_cas or self._is_tdg:
                     record.metadata["compilation_success"] = False
@@ -655,6 +761,10 @@ class EvolutionEngine:
                 record.reasoning_trace = list(result.reasoning_trace)
                 record.verification_passed = bool(result.verification_passed)
                 record.tokens_used = int(result.tokens_used)
+                record.prompt_tokens = int(getattr(result, "prompt_tokens", 0) or 0)
+                record.completion_tokens = int(getattr(result, "completion_tokens", 0) or 0)
+                record.metadata["prompt_tokens"] = record.prompt_tokens
+                record.metadata["completion_tokens"] = record.completion_tokens
                 record.metadata.update(result.metadata)
                 worker_status = "ok"
 
@@ -703,6 +813,8 @@ class EvolutionEngine:
                     "worker_status": worker_status,
                     "worker_seconds": round(worker_seconds, 3),
                     "tokens_used": int(record.tokens_used),
+                    "prompt_tokens": int(record.prompt_tokens),
+                    "completion_tokens": int(record.completion_tokens),
                     "compilation_success": bool(record.metadata.get("compilation_success", False)),
                     "execution_success": bool(record.metadata.get("execution_success", False)),
                     "worker_stage": str(record.metadata.get("stage", "")),
@@ -739,7 +851,11 @@ class EvolutionEngine:
                 },
             )
 
-            attention_drift = self._measure_attention_drift(record, effective_context=effective_context)
+            attention_drift = self._measure_attention_drift(
+                record,
+                effective_context=effective_context,
+                rng=task_rng,
+            )
             if attention_drift is not None:
                 attention_drift_values.append(float(attention_drift.get("score", 0.0)))
                 self._append_jsonl(
@@ -795,6 +911,8 @@ class EvolutionEngine:
                     "trace": record.reasoning_trace,
                     "verification_passed": record.verification_passed,
                     "tokens_used": record.tokens_used,
+                    "prompt_tokens": int(record.prompt_tokens),
+                    "completion_tokens": int(record.completion_tokens),
                     "failure_feedback": failure_feedback,
                     "judge_summary": {
                         "rationale": failure_feedback.get("judge_rationale", ""),
@@ -827,6 +945,8 @@ class EvolutionEngine:
                     "task_seconds": round(task_seconds, 3),
                     "score": score,
                     "tokens_used": int(record.tokens_used),
+                    "prompt_tokens": int(record.prompt_tokens),
+                    "completion_tokens": int(record.completion_tokens),
                     "verification_passed": (
                         bool(record.verification_passed) if record.verification_passed is not None else None
                     ),
@@ -837,7 +957,9 @@ class EvolutionEngine:
             print(
                 f"[Gen {generation}] cand {candidate_index}/{candidate_total} "
                 f"task {task_idx}/{len(sampled)} done score={score:.0f} "
-                f"tokens={int(record.tokens_used)} elapsed={task_seconds:.1f}s"
+                f"in_tokens={int(record.prompt_tokens)} "
+                f"out_tokens={int(record.completion_tokens)} "
+                f"elapsed={task_seconds:.1f}s"
             )
 
         total_tasks = float(len(sampled) or 1)
@@ -1098,6 +1220,7 @@ class EvolutionEngine:
         self,
         record: TaskRecord,
         effective_context: str | None = None,
+        rng: random.Random | None = None,
     ) -> dict[str, Any] | None:
         """Estimate context-faithfulness drift (0=faithful, 1=parametric override)."""
 
@@ -1105,7 +1228,8 @@ class EvolutionEngine:
             return None
         if self.config.attention_drift_sample_rate <= 0:
             return None
-        if self.rng.random() > self.config.attention_drift_sample_rate:
+        random_source = rng or self.rng
+        if random_source.random() > self.config.attention_drift_sample_rate:
             return None
 
         answer = str(record.model_output or "").strip()
@@ -1404,11 +1528,11 @@ class EvolutionEngine:
     def _now_iso() -> str:
         return datetime.now().isoformat(timespec="seconds")
 
-    @staticmethod
-    def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as file_obj:
-            file_obj.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
+        with self._log_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as file_obj:
+                file_obj.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _append_failure_samples(self, generation: int, sha: str, failures: list[dict[str, Any]], limit: int = 5) -> None:
         """Write a few failure samples per candidate for quick debugging."""

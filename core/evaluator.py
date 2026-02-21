@@ -170,11 +170,19 @@ def run_protocol_on_benchmark(
             record.reasoning_trace = ["Protocol execution failed or timed out."]
             record.verification_passed = False
             record.tokens_used = 0
+            record.prompt_tokens = 0
+            record.completion_tokens = 0
+            record.metadata["prompt_tokens"] = 0
+            record.metadata["completion_tokens"] = 0
         else:
             record.model_output = result.answer
             record.reasoning_trace = list(result.reasoning_trace)
             record.verification_passed = bool(result.verification_passed)
             record.tokens_used = int(result.tokens_used)
+            record.prompt_tokens = int(getattr(result, "prompt_tokens", 0) or 0)
+            record.completion_tokens = int(getattr(result, "completion_tokens", 0) or 0)
+            record.metadata["prompt_tokens"] = record.prompt_tokens
+            record.metadata["completion_tokens"] = record.completion_tokens
             record.metadata.update(result.metadata)
 
         benchmark.evaluate(record, judge_client=judge_client)

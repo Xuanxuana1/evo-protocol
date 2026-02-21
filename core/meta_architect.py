@@ -57,6 +57,8 @@ class MetaArchitect:
         parent_performance: ParentPerformance,
         failure_examples: list[dict[str, Any]],
         max_repair_attempts: int = 2,
+        architect_temperature: float | None = None,
+        repair_temperature: float | None = None,
     ) -> tuple[BaseProtocol | None, str]:
         """Generate and validate a child protocol using self-repair loop."""
 
@@ -74,6 +76,8 @@ class MetaArchitect:
             loader=loader,
             max_repair_attempts=max_repair_attempts,
             request_tag=f"g{generation}-m{mutation_attempt}",
+            architect_temperature=architect_temperature,
+            repair_temperature=repair_temperature,
         )
 
     # ------------------------------------------------------------------

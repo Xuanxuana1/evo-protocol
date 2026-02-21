@@ -21,6 +21,8 @@ class TaskRecord:
     model_output: Optional[str] = None
     reasoning_trace: list[str] = field(default_factory=list)
     tokens_used: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     verification_passed: Optional[bool] = None
 
     score: Optional[float] = None

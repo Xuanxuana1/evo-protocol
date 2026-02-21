@@ -68,6 +68,8 @@ def _serialize_result(result: ProtocolResult) -> dict[str, Any]:
         "reasoning_trace": list(result.reasoning_trace),
         "verification_passed": bool(result.verification_passed),
         "tokens_used": int(result.tokens_used),
+        "prompt_tokens": int(result.prompt_tokens),
+        "completion_tokens": int(result.completion_tokens),
         "metadata": dict(result.metadata),
     }
 
@@ -403,6 +405,8 @@ class ProtocolLoader:
                 reasoning_trace=list(result_payload.get("reasoning_trace", [])),
                 verification_passed=bool(result_payload.get("verification_passed", False)),
                 tokens_used=int(result_payload.get("tokens_used", 0)),
+                prompt_tokens=int(result_payload.get("prompt_tokens", 0)),
+                completion_tokens=int(result_payload.get("completion_tokens", 0)),
                 metadata=dict(result_payload.get("metadata", {})),
             )
         except Exception:
@@ -434,6 +438,8 @@ def _serialize_sandbox_result(result: SandboxResult) -> dict[str, Any]:
         "reasoning_trace": list(result.reasoning_trace),
         "verification_passed": bool(result.verification_passed),
         "tokens_used": int(result.tokens_used),
+        "prompt_tokens": int(result.prompt_tokens),
+        "completion_tokens": int(result.completion_tokens),
         "metadata": dict(result.metadata),
         "sandbox_code": result.sandbox_code,
         "solver_code": result.solver_code,
@@ -821,6 +827,8 @@ class SandboxProtocolLoader:
                 reasoning_trace=list(result_payload.get("reasoning_trace", [])),
                 verification_passed=bool(result_payload.get("verification_passed", False)),
                 tokens_used=int(result_payload.get("tokens_used", 0)),
+                prompt_tokens=int(result_payload.get("prompt_tokens", 0)),
+                completion_tokens=int(result_payload.get("completion_tokens", 0)),
                 metadata=dict(result_payload.get("metadata", {})),
                 sandbox_code=str(result_payload.get("sandbox_code", "")),
                 solver_code=str(result_payload.get("solver_code", "")),
@@ -1096,7 +1104,8 @@ class TDGProtocolLoader:
                 "llm", "model", "context_char_limit", "query_char_limit",
                 "max_completion_tokens", "oracle_max_completion_tokens",
                 "api_timeout_seconds", "sandbox_timeout_seconds",
-                "_call_count", "_task_tokens_used", "_oracle_call_count",
+                "_call_count", "_task_tokens_used", "_task_prompt_tokens",
+                "_task_completion_tokens", "_oracle_call_count",
                 "_max_llm_calls_current",
             }
             class_defined = set(method_nodes.keys())
@@ -1318,6 +1327,8 @@ class TDGProtocolLoader:
                 reasoning_trace=list(result_payload.get("reasoning_trace", [])),
                 verification_passed=bool(result_payload.get("verification_passed", False)),
                 tokens_used=int(result_payload.get("tokens_used", 0)),
+                prompt_tokens=int(result_payload.get("prompt_tokens", 0)),
+                completion_tokens=int(result_payload.get("completion_tokens", 0)),
                 metadata=dict(result_payload.get("metadata", {})),
                 sandbox_code=str(result_payload.get("sandbox_code", "")),
                 solver_code=str(result_payload.get("solver_code", "")),

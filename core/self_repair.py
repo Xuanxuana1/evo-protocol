@@ -316,7 +316,16 @@ def _pick_best_candidate(
 
 
 def _extract_supported_max_tokens(error_text: str) -> Optional[int]:
-    match = re.search(r"supports at most\s+(\d+)\s+completion tokens", error_text, flags=re.IGNORECASE)
+    patterns = (
+        r"supports at most\s+(\d+)\s+completion tokens",
+        r"supports at most\s+(\d+)\s+output tokens",
+        r"max(?:imum)?\s+(?:output\s+)?tokens?\s*(?:is|=)\s*(\d+)",
+    )
+    match = None
+    for pattern in patterns:
+        match = re.search(pattern, error_text, flags=re.IGNORECASE)
+        if match:
+            break
     if not match:
         return None
     try:
@@ -326,11 +335,57 @@ def _extract_supported_max_tokens(error_text: str) -> Optional[int]:
     return value if value > 0 else None
 
 
+def _extract_responses_text(response_obj) -> str:
+    """Best-effort extraction from Responses API payloads."""
+
+    output_text = getattr(response_obj, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+
+    parts: list[str] = []
+    output_items = getattr(response_obj, "output", None)
+    if isinstance(output_items, list):
+        for item in output_items:
+            content_items = getattr(item, "content", None)
+            if content_items is None and isinstance(item, dict):
+                content_items = item.get("content")
+            if not isinstance(content_items, list):
+                continue
+            for content in content_items:
+                text_value = getattr(content, "text", None)
+                if text_value is None and isinstance(content, dict):
+                    text_value = content.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    parts.append(text_value)
+
+    if parts:
+        return "\n".join(parts)
+    return ""
+
+
+def _is_chat_model_incompat_error(error_text: str) -> bool:
+    lowered = str(error_text or "").lower()
+    markers = (
+        "chatcompletion operation does not work",
+        "chat completion operation does not work",
+        "chat.completions operation does not work",
+        "operation does not work with the specified model",
+        "use responses api",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_unsupported_temperature_error(error_text: str) -> bool:
+    lowered = str(error_text or "").lower()
+    return "temperature" in lowered and "unsupported parameter" in lowered
+
+
 def _call_architect(
     architect_client,
     architect_model: str,
     prompt: str,
     request_tag: str = "",
+    temperature_override: float | None = None,
 ) -> str:
     request_timeout = env_float(
         ["ARCHITECT_API_TIMEOUT_SECONDS", "EVO_ARCHITECT_API_TIMEOUT_SECONDS"],
@@ -346,10 +401,16 @@ def _call_architect(
         ["ARCHITECT_TOTAL_TIMEOUT_SECONDS", "EVO_ARCHITECT_TOTAL_TIMEOUT_SECONDS"],
         default=max(30.0, float(request_timeout) * max_retries),
     )
-    temperature = env_float(["ARCHITECT_TEMPERATURE", "EVO_ARCHITECT_TEMPERATURE"], default=0.0)
+    if temperature_override is None:
+        temperature = env_float(["ARCHITECT_TEMPERATURE", "EVO_ARCHITECT_TEMPERATURE"], default=0.0)
+    else:
+        temperature = float(max(0.0, min(2.0, temperature_override)))
     token_limit = max(256, int(max_tokens))
     base_prompt = str(prompt or "")
     started = time.monotonic()
+    prefers_responses = "codex" in architect_model.lower()
+    # Many codex deployments are responses-only and may reject temperature.
+    suppress_temperature = prefers_responses
 
     for attempt in range(max_retries):
         elapsed = time.monotonic() - started
@@ -366,32 +427,84 @@ def _call_architect(
             f"[request_nonce={nonce}]"
         )
         effective_timeout = max(1.0, min(float(request_timeout), remaining))
-        try:
-            response = architect_client.chat.completions.create(
-                model=architect_model,
-                messages=[{"role": "user", "content": prompt_with_nonce}],
-                temperature=temperature,
-                max_tokens=token_limit,
-                timeout=effective_timeout,
-            )
-            return response.choices[0].message.content or ""
-        except Exception as exc:
-            error_text = str(exc)
-            lowered = error_text.lower()
-            supported = _extract_supported_max_tokens(error_text)
-            if supported is not None and supported < token_limit:
-                token_limit = max(256, supported)
-                time.sleep(0.5)
-                continue
+        if prefers_responses:
+            endpoint_order = ["responses"]
+        else:
+            endpoint_order = ["chat", "responses"]
 
-            if "same request has failed before" in lowered:
-                # Retry with a new nonce so the provider sees a distinct request.
-                time.sleep(1.0 + 0.5 * attempt)
-                continue
+        last_exc: Exception | None = None
+        endpoint_failures: list[tuple[str, Exception]] = []
 
-            if attempt >= max_retries - 1:
-                raise RuntimeError(f"Architect API failed after {max_retries} attempts: {exc}") from exc
-            time.sleep(1.0 + attempt)
+        for endpoint in endpoint_order:
+            endpoint_no_temp = suppress_temperature
+            while True:
+                try:
+                    if endpoint == "chat":
+                        request_kwargs = {
+                            "model": architect_model,
+                            "messages": [{"role": "user", "content": prompt_with_nonce}],
+                            "max_tokens": token_limit,
+                            "timeout": effective_timeout,
+                        }
+                        if not endpoint_no_temp:
+                            request_kwargs["temperature"] = temperature
+                        response = architect_client.chat.completions.create(**request_kwargs)
+                        return response.choices[0].message.content or ""
+
+                    if not hasattr(architect_client, "responses"):
+                        raise RuntimeError("Responses API not available on architect client")
+                    request_kwargs = {
+                        "model": architect_model,
+                        "input": prompt_with_nonce,
+                        "max_output_tokens": token_limit,
+                        "timeout": effective_timeout,
+                    }
+                    if not endpoint_no_temp:
+                        request_kwargs["temperature"] = temperature
+                    response = architect_client.responses.create(**request_kwargs)
+                    extracted = _extract_responses_text(response)
+                    return extracted if extracted else str(response)
+                except Exception as exc:
+                    error_text = str(exc)
+                    if not endpoint_no_temp and _is_unsupported_temperature_error(error_text):
+                        endpoint_no_temp = True
+                        suppress_temperature = True
+                        continue
+
+                    last_exc = exc
+                    endpoint_failures.append((endpoint, exc))
+                    if endpoint == "chat" and _is_chat_model_incompat_error(error_text):
+                        break
+                    # Try next endpoint in this same attempt if available.
+                    break
+
+        if last_exc is None:
+            raise RuntimeError("Architect API failed with unknown error")
+
+        # If chat fails with model incompatibility after trying responses,
+        # surface the responses error for clearer diagnosis.
+        if _is_chat_model_incompat_error(str(last_exc)) and endpoint_failures:
+            for endpoint, exc in endpoint_failures:
+                if endpoint == "responses":
+                    last_exc = exc
+                    break
+
+        error_text = str(last_exc)
+        lowered = error_text.lower()
+        supported = _extract_supported_max_tokens(error_text)
+        if supported is not None and supported < token_limit:
+            token_limit = max(256, supported)
+            time.sleep(0.5)
+            continue
+
+        if "same request has failed before" in lowered:
+            # Retry with a new nonce so the provider sees a distinct request.
+            time.sleep(1.0 + 0.5 * attempt)
+            continue
+
+        if attempt >= max_retries - 1:
+            raise RuntimeError(f"Architect API failed after {max_retries} attempts: {last_exc}") from last_exc
+        time.sleep(1.0 + attempt)
     raise RuntimeError("Architect API failed with unknown error")
 
 
@@ -402,6 +515,8 @@ def generate_with_repair(
     loader: Union[ProtocolLoader, SandboxProtocolLoader, TDGProtocolLoader],
     max_repair_attempts: int = 2,
     request_tag: str = "",
+    architect_temperature: float | None = None,
+    repair_temperature: float | None = None,
 ) -> tuple[Optional[BaseProtocol], str]:
     """Generate protocol code and retry repairs on validation failures.
 
@@ -415,6 +530,7 @@ def generate_with_repair(
             architect_model,
             architect_prompt,
             request_tag=f"{request_prefix}-init",
+            temperature_override=architect_temperature,
         )
     except Exception as exc:
         return None, str(exc)
@@ -521,6 +637,7 @@ def generate_with_repair(
                 architect_model,
                 repair_prompt,
                 request_tag=f"{request_prefix}-repair-{attempt}",
+                temperature_override=repair_temperature,
             )
         except Exception as exc:
             return None, str(exc)
