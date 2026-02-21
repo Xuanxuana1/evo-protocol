@@ -22,7 +22,7 @@ env/
 
 # Generated benchmark artifacts
 outputs/
-archive/*/
+archive/**
 
 # Notebook checkpoints
 .ipynb_checkpoints/
