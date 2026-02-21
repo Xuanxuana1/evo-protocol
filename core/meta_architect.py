@@ -204,9 +204,17 @@ class MetaArchitect:
             Failure examples:
             {failures_text}
 
+            Generalization mandate:
+            - Learn mechanism-level fixes from failures, not task-specific patches.
+            - Never hardcode entities/phrases from failure examples into generated
+              code unless they are explicitly present in the current context/query.
+            - Prefer reusable templates: parse requirement -> build check -> verify.
+
             Improvement strategy by failure mode:
-            - F1 (Parametric Override): Add assertions/Pydantic validators enforcing
-              context values. _oracle() for semantic checks blocks parametric priors.
+            - F1 (Parametric Override): Add reusable assertions/Pydantic validators
+              that enforce context-derived constraints. Prioritize generic checks for
+              exact-phrase requirements, forbidden content, and contradiction with
+              common priors only when evidence appears in current context.
             - F2 (Context Navigation): Compile ALL facts into namespace objects.
               Missing data = NameError at runtime. Use _oracle for nuanced facts.
             - F3 (Reasoning Breakdown): Move multi-step logic to Python loops/functions
@@ -275,9 +283,9 @@ class MetaArchitect:
                  * Format checks: required structure/format
                  * Keyword checks: critical terms present
                  * Semantic/tone checks via _oracle(prompt, bool)
-                 * Anti-parametric-override: assert context-specific facts that
-                   contradict common knowledge (e.g., assert 'green' in answer
-                   when context says sky is green)
+                 * Anti-parametric-override: enforce context-derived constraints
+                   using reusable templates (exact phrase, forbidden content,
+                   context-over-prior contradictions) without hardcoded literals
                  * Constraint checks: length, persona, style requirements
                - Return the generated code as a string
 
@@ -302,6 +310,7 @@ class MetaArchitect:
             - Semantic tests: Use _oracle for tone, style, persona compliance
             - Constraint tests: Word count, language, specific exclusions
             - Anti-override tests: Assert context-contradicting facts are preserved
+              via parsed constraints, not one-off literals from failures
 
             Constraints:
             1) Import from core.base_tdg_protocol: BaseTDGCompiler
@@ -350,11 +359,18 @@ class MetaArchitect:
             Failure examples:
             {failures_text}
 
+            Generalization mandate:
+            - Treat failure examples as pattern evidence, not string templates.
+            - Do not copy named entities, numbers, or phrases from failure examples
+              unless the same values are explicitly present in current context/query.
+            - Each added test should be reusable across unrelated tasks.
+
             Improvement strategy:
             - Low test_pass_rate: Write more targeted tests that catch actual errors.
               Avoid overly strict tests that reject valid answers.
-            - F1 (Parametric Override): Add anti-override tests that assert
-              context-specific facts contradicting common knowledge.
+            - F1 (Parametric Override): Add anti-override tests from extracted
+              requirements (exact phrase, role/style constraints, context-over-prior
+              conflicts) instead of hardcoded task-specific assertions.
             - F2 (Context Navigation): Write tests checking that key evidence
               from context appears in the answer.
             - F3 (Reasoning Breakdown): Add tests for intermediate reasoning

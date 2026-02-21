@@ -1,0 +1,82 @@
+{
+  "sha": "39a14b3785e8",
+  "generation": 1,
+  "parent_sha": "4658f18e16d1",
+  "score": 0.37566176282051283,
+  "visit_count": 0,
+  "seen_generations": [
+    1
+  ],
+  "eval_count": 2,
+  "last_evaluated_generation": 2,
+  "best_score": 0.37566176282051283,
+  "last_failure_summary": {
+    "num_tasks": 4,
+    "num_failures": 2,
+    "fitness": 0.5517628205128206,
+    "failure_rate": 0.5,
+    "accuracy": 0.5,
+    "avg_tokens_per_task": 71029.75,
+    "max_tokens_per_task": 111146,
+    "token_efficiency": 7.039303953625065e-06,
+    "fitness_token_efficiency": 7.76805240779843e-06,
+    "verification_failed_count": 1,
+    "attention_drift_mean": null,
+    "attention_drift_high_rate": null,
+    "attention_drift_measured_tasks": 0,
+    "failure_mode_counts": {
+      "F1": 2
+    },
+    "top_root_causes": [
+      "Candidate answer failed protocol verification; likely context-faithfulness issue.",
+      "Answer does not satisfy all rubric constraints based on judge feedback."
+    ],
+    "top_repair_actions": [
+      "Strengthen claim-to-context verification before final output.",
+      "Force citation of supporting context spans in reasoning.",
+      "Improve perception granularity for long context sections.",
+      "Add intermediate reasoning checks before final synthesis."
+    ],
+    "top_unsatisfied_rubrics": [
+      "Does the agent remove jargon that is not necessary? Fail if unnecessary jargon remains in the edited text",
+      "Does the agent maintain professional tone throughout? Fail if tone becomes unprofessional, overly casual, or inconsistently formal",
+      "Does the agent improve the clarity of the draft? Fail if clarity is not improved or is degraded",
+      "Does the agent fix awkward phrasing? Fail if awkward phrasing is not corrected",
+      "Does the agent ensure terminology stays consistent across the entire document? Fail if same concepts are referred to with different terms inconsistently",
+      "The response should explain how the examples that display as 3.4.1 and 3.4.2 differ because of the order of the equation:\r\n\\subsubsection{Zeroth order system: magnetic rotating shallow water equations}\\label{sec4.4.1}...",
+      "The response should not explain examples other than ones in the excerpt below:\r\n\\subsubsection{Zeroth order system: magnetic rotating shallow water equations}\\label{sec4.4.1}\r\n%=================================\r\nUsing..."
+    ],
+    "compilation_success_rate": 1.0,
+    "execution_success_rate": 1.0,
+    "compilation_failure_count": 0,
+    "execution_failure_count": 0,
+    "top_compilation_errors": [],
+    "top_execution_errors": [],
+    "avg_test_pass_rate": 0.8450854700854701,
+    "false_positive_count": 1,
+    "false_positive_rate": 0.25,
+    "sanitized_test_drop_count": 0,
+    "raw_test_count": 37,
+    "sanitized_test_drop_rate": 0.0
+  },
+  "evaluation_history": [
+    {
+      "generation": 2,
+      "score": 0.37566176282051283,
+      "num_tasks": 4,
+      "num_failures": 2,
+      "failure_rate": 0.5,
+      "token_efficiency": 7.039303953625065e-06,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F1": 2
+      },
+      "top_root_causes": [
+        "Candidate answer failed protocol verification; likely context-faithfulness issue.",
+        "Answer does not satisfy all rubric constraints based on judge feedback."
+      ]
+    }
+  ]
+}

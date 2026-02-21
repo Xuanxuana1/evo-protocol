@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,6 +47,9 @@ class EvolutionConfig:
     sandbox_timeout_seconds: int = 30
     selection_tau: float = 0.5
     selection_alpha: float = 0.5
+    mutation_attempts_per_child: int = 3
+    mutation_time_budget_seconds: float = 300.0
+    mutation_max_same_rejection: int = 3
     fitness_weights: dict[str, float] = field(default_factory=lambda: {
         "answer_correctness": 0.8,
         "execution_success": 0.1,
@@ -135,6 +140,7 @@ class EvolutionEngine:
             )
 
         history: list[dict[str, Any]] = []
+        best_overall: dict[str, Any] | None = None
         self._append_jsonl(
             self.generation_trace_path,
             {
@@ -156,16 +162,50 @@ class EvolutionEngine:
         for generation in range(1, self.config.generations + 1):
             print(f"\n[Gen {generation}] evaluating {len(population)} protocols (mode={self.config.mode})...")
             sampled_tasks = self._sample_tasks(self.config.tasks_per_evaluation)
+            generation_eval_cache: dict[str, tuple[float, dict[str, float], list[dict[str, Any]], dict[str, Any], int]] = {}
 
             for idx, candidate in enumerate(population, start=1):
-                fitness, mode_accuracy, failures, eval_summary = self._evaluate_protocol(
-                    protocol=candidate["protocol"],
-                    generation=generation,
-                    candidate_index=idx,
-                    candidate_total=len(population),
-                    candidate_sha=candidate["sha"],
-                    sampled_tasks=sampled_tasks,
-                )
+                candidate_sha = str(candidate.get("sha", ""))
+                cached_eval = generation_eval_cache.get(candidate_sha) if candidate_sha else None
+                if cached_eval is not None:
+                    fitness, mode_accuracy, failures, eval_summary, source_idx = cached_eval
+                    fitness = float(fitness)
+                    mode_accuracy = dict(copy.deepcopy(mode_accuracy))
+                    failures = list(copy.deepcopy(failures))
+                    eval_summary = dict(copy.deepcopy(eval_summary))
+                    print(
+                        f"[Gen {generation}] candidate {idx}/{len(population)} "
+                        f"sha={candidate_sha} reusing eval from cand {source_idx}"
+                    )
+                    self._append_jsonl(
+                        self.generation_trace_path,
+                        {
+                            "run_id": self.run_id,
+                            "event": "candidate_eval_reused",
+                            "time": self._now_iso(),
+                            "generation": generation,
+                            "candidate_index": idx,
+                            "source_candidate_index": source_idx,
+                            "sha": candidate_sha,
+                        },
+                    )
+                else:
+                    fitness, mode_accuracy, failures, eval_summary = self._evaluate_protocol(
+                        protocol=candidate["protocol"],
+                        generation=generation,
+                        candidate_index=idx,
+                        candidate_total=len(population),
+                        candidate_sha=candidate_sha,
+                        sampled_tasks=sampled_tasks,
+                    )
+                    if candidate_sha:
+                        generation_eval_cache[candidate_sha] = (
+                            float(fitness),
+                            dict(copy.deepcopy(mode_accuracy)),
+                            list(copy.deepcopy(failures)),
+                            dict(copy.deepcopy(eval_summary)),
+                            idx,
+                        )
                 candidate["fitness"] = fitness
                 candidate["mode_accuracy"] = mode_accuracy
                 candidate["failures"] = failures
@@ -203,6 +243,8 @@ class EvolutionEngine:
                     candidate_log["execution_success_rate"] = eval_summary.get("execution_success_rate", 0.0)
                 if self._is_tdg:
                     candidate_log["avg_test_pass_rate"] = eval_summary.get("avg_test_pass_rate", 0.0)
+                    candidate_log["sanitized_test_drop_rate"] = eval_summary.get("sanitized_test_drop_rate", 0.0)
+                    candidate_log["false_positive_rate"] = eval_summary.get("false_positive_rate", 0.0)
 
                 self._append_jsonl(self.candidate_trace_path, candidate_log)
                 print(
@@ -216,6 +258,14 @@ class EvolutionEngine:
             ranked = sorted(population, key=self._candidate_rank_key, reverse=True)
             elites = ranked[: max(1, self.config.elite_count)]
             best = elites[0]
+            if best_overall is None or self._candidate_rank_key(best) > self._candidate_rank_key(best_overall):
+                best_overall = {
+                    "sha": best.get("sha", ""),
+                    "fitness": float(best.get("fitness", 0.0)),
+                    "answer_accuracy": float(best.get("answer_accuracy", 0.0)),
+                    "selection_score": float(best.get("selection_score", 0.0)),
+                    "eval_summary": dict(best.get("eval_summary", {})),
+                }
             diversity = self._compute_population_diversity(ranked)
             gen_record = {
                 "generation": generation,
@@ -251,119 +301,254 @@ class EvolutionEngine:
 
             new_population = [dict(item) for item in elites]
             mutation_attempts = 0
-            max_attempts = self.config.population_size * 6
+            slots_to_fill = max(0, self.config.population_size - len(new_population))
+            attempts_per_child = max(1, int(getattr(self.config, "mutation_attempts_per_child", 3)))
+            max_attempts = max(1, slots_to_fill * attempts_per_child)
+            mutation_deadline = perf_counter() + max(
+                1.0,
+                float(getattr(self.config, "mutation_time_budget_seconds", 300.0)),
+            )
             existing_child_shas = {str(item.get("sha", "")) for item in new_population if str(item.get("sha", ""))}
             elite_by_sha: dict[str, dict[str, Any]] = {}
+            last_rejection_reason = ""
+            same_rejection_streak = 0
+            max_same_rejection = max(1, int(getattr(self.config, "mutation_max_same_rejection", 3)))
             for item in elites:
                 sha = str(item.get("sha", "")).strip()
                 if sha and sha not in elite_by_sha:
                     elite_by_sha[sha] = item
 
-            for _ in range(max_attempts):
-                if len(new_population) >= self.config.population_size:
-                    break
-                mutation_attempts += 1
-                selected_shas = self.archive.select(
-                    k=1,
-                    tau=self.config.selection_tau,
-                    alpha=self.config.selection_alpha,
-                    candidate_shas=list(elite_by_sha.keys()),
+            if slots_to_fill > 0:
+                print(
+                    f"[Gen {generation}] mutating to fill {slots_to_fill} slot(s) "
+                    f"(max_attempts={max_attempts}, time_budget={int(max(0.0, mutation_deadline - perf_counter()))}s)"
                 )
-                selected_sha = selected_shas[0] if selected_shas else ""
-                parent = elite_by_sha.get(selected_sha) if selected_sha else None
-                if parent is None:
-                    parent = self.rng.choice(elites)
-                parent_perf = self._build_parent_performance(
-                    parent.get("mode_accuracy", {}),
-                    float(parent.get("answer_accuracy", parent["fitness"])),
-                    parent.get("eval_summary"),
-                )
-                failures = parent.get("failures", [])
-                sampled_failures = self.rng.sample(
-                    failures,
-                    k=min(len(failures), self.config.failure_samples_per_mutation),
-                ) if failures else []
+            stop_mutation = False
+            max_workers = max(1, min(slots_to_fill, max_attempts)) if slots_to_fill > 0 else 1
+            mutation_pool = ThreadPoolExecutor(max_workers=max_workers)
+            try:
+                while (
+                    len(new_population) < self.config.population_size
+                    and mutation_attempts < max_attempts
+                    and not stop_mutation
+                ):
+                    now = perf_counter()
+                    if now >= mutation_deadline:
+                        self._append_jsonl(
+                            self.generation_trace_path,
+                            {
+                                "run_id": self.run_id,
+                                "event": "mutation_budget_exhausted",
+                                "time": self._now_iso(),
+                                "generation": generation,
+                                "attempts_used": mutation_attempts,
+                                "max_attempts": max_attempts,
+                                "population_filled": len(new_population),
+                                "population_target": self.config.population_size,
+                            },
+                        )
+                        print(
+                            f"[Gen {generation}] mutation budget exhausted after {mutation_attempts} attempt(s); "
+                            f"filling remaining slots with elites."
+                        )
+                        break
 
-                child_protocol, child_code_or_err = self.meta_architect.mutate(
-                    loader=self.loader,
-                    generation=generation,
-                    mutation_attempt=mutation_attempts,
-                    parent_code=parent["code"],
-                    parent_performance=parent_perf,
-                    failure_examples=sampled_failures,
-                    max_repair_attempts=self.config.max_repair_attempts,
-                )
-                if child_protocol is None:
-                    self._append_jsonl(
-                        self.generation_trace_path,
-                        {
-                            "run_id": self.run_id,
-                            "event": "mutation_rejected",
-                            "time": self._now_iso(),
-                            "generation": generation,
-                            "parent_sha": parent["sha"],
-                            "reason": str(child_code_or_err)[:320],
-                        },
-                    )
-                    continue
+                    attempts_left = max_attempts - mutation_attempts
+                    slots_left = self.config.population_size - len(new_population)
+                    batch_size = max(0, min(attempts_left, slots_left))
+                    if batch_size <= 0:
+                        break
 
-                child_code = child_code_or_err
-                child_sha = self.archive.save(
-                    child_code,
-                    generation=generation,
-                    parent_sha=parent["sha"],
-                )
-                if child_sha in existing_child_shas:
-                    self._append_jsonl(
-                        self.generation_trace_path,
-                        {
-                            "run_id": self.run_id,
-                            "event": "mutation_duplicate",
-                            "time": self._now_iso(),
-                            "generation": generation,
-                            "parent_sha": parent["sha"],
-                            "child_sha": child_sha,
-                        },
-                    )
-                    continue
-                existing_child_shas.add(child_sha)
-                new_population.append(
-                    {
-                        "sha": child_sha,
-                        "code": child_code,
-                        "protocol": child_protocol,
-                        "fitness": 0.0,
-                        "selection_score": 0.0,
-                        "answer_accuracy": 0.0,
-                        "mode_accuracy": {},
-                        "failures": [],
-                    }
-                )
+                    futures_to_meta: dict[Any, dict[str, Any]] = {}
+                    for _ in range(batch_size):
+                        mutation_attempts += 1
+                        selected_shas = self.archive.select(
+                            k=1,
+                            tau=self.config.selection_tau,
+                            alpha=self.config.selection_alpha,
+                            candidate_shas=list(elite_by_sha.keys()),
+                        )
+                        selected_sha = selected_shas[0] if selected_shas else ""
+                        parent = elite_by_sha.get(selected_sha) if selected_sha else None
+                        if parent is None:
+                            parent = self.rng.choice(elites)
+                        parent_perf = self._build_parent_performance(
+                            parent.get("mode_accuracy", {}),
+                            float(parent.get("answer_accuracy", parent["fitness"])),
+                            parent.get("eval_summary"),
+                        )
+                        failures = parent.get("failures", [])
+                        sampled_failures = self.rng.sample(
+                            failures,
+                            k=min(len(failures), self.config.failure_samples_per_mutation),
+                        ) if failures else []
 
+                        attempt_id = mutation_attempts
+                        print(
+                            f"[Gen {generation}] mutate attempt {attempt_id}/{max_attempts} "
+                            f"parent={str(parent.get('sha', 'unknown'))[:12]}"
+                        )
+                        future = mutation_pool.submit(
+                            self.meta_architect.mutate,
+                            loader=self.loader,
+                            generation=generation,
+                            mutation_attempt=attempt_id,
+                            parent_code=parent["code"],
+                            parent_performance=parent_perf,
+                            failure_examples=sampled_failures,
+                            max_repair_attempts=self.config.max_repair_attempts,
+                        )
+                        futures_to_meta[future] = {
+                            "parent": parent,
+                            "attempt_id": attempt_id,
+                        }
+
+                    remaining_budget = max(0.0, mutation_deadline - perf_counter())
+                    try:
+                        for future in as_completed(futures_to_meta.keys(), timeout=remaining_budget):
+                            meta = futures_to_meta[future]
+                            parent = meta["parent"]
+                            try:
+                                child_protocol, child_code_or_err = future.result()
+                            except Exception as exc:  # pragma: no cover - defensive path
+                                child_protocol = None
+                                child_code_or_err = str(exc)
+
+                            if child_protocol is None:
+                                reason = str(child_code_or_err)[:320]
+                                normalized_reason = re.sub(r"\s+", " ", reason).strip()
+                                if normalized_reason and normalized_reason == last_rejection_reason:
+                                    same_rejection_streak += 1
+                                else:
+                                    last_rejection_reason = normalized_reason
+                                    same_rejection_streak = 1 if normalized_reason else 0
+                                self._append_jsonl(
+                                    self.generation_trace_path,
+                                    {
+                                        "run_id": self.run_id,
+                                        "event": "mutation_rejected",
+                                        "time": self._now_iso(),
+                                        "generation": generation,
+                                        "parent_sha": parent["sha"],
+                                        "reason": reason,
+                                    },
+                                )
+                                print(f"[Gen {generation}] mutation rejected: {reason}")
+                                if same_rejection_streak >= max_same_rejection:
+                                    self._append_jsonl(
+                                        self.generation_trace_path,
+                                        {
+                                            "run_id": self.run_id,
+                                            "event": "mutation_rejection_streak",
+                                            "time": self._now_iso(),
+                                            "generation": generation,
+                                            "reason": normalized_reason[:320],
+                                            "streak": same_rejection_streak,
+                                        },
+                                    )
+                                    print(
+                                        f"[Gen {generation}] rejection streak hit {same_rejection_streak}; "
+                                        "stopping mutation attempts early."
+                                    )
+                                    stop_mutation = True
+                                continue
+
+                            child_code = child_code_or_err
+                            last_rejection_reason = ""
+                            same_rejection_streak = 0
+                            child_sha = self.archive.save(
+                                child_code,
+                                generation=generation,
+                                parent_sha=parent["sha"],
+                            )
+                            if child_sha in existing_child_shas:
+                                self._append_jsonl(
+                                    self.generation_trace_path,
+                                    {
+                                        "run_id": self.run_id,
+                                        "event": "mutation_duplicate",
+                                        "time": self._now_iso(),
+                                        "generation": generation,
+                                        "parent_sha": parent["sha"],
+                                        "child_sha": child_sha,
+                                    },
+                                )
+                                print(f"[Gen {generation}] mutation duplicate child={child_sha}; retrying")
+                                continue
+                            existing_child_shas.add(child_sha)
+                            new_population.append(
+                                {
+                                    "sha": child_sha,
+                                    "code": child_code,
+                                    "protocol": child_protocol,
+                                    "fitness": 0.0,
+                                    "selection_score": 0.0,
+                                    "answer_accuracy": 0.0,
+                                    "mode_accuracy": {},
+                                    "failures": [],
+                                }
+                            )
+                            print(f"[Gen {generation}] mutation accepted child={child_sha}")
+                            if len(new_population) >= self.config.population_size:
+                                stop_mutation = True
+                    except FuturesTimeoutError:
+                        self._append_jsonl(
+                            self.generation_trace_path,
+                            {
+                                "run_id": self.run_id,
+                                "event": "mutation_budget_exhausted",
+                                "time": self._now_iso(),
+                                "generation": generation,
+                                "attempts_used": mutation_attempts,
+                                "max_attempts": max_attempts,
+                                "population_filled": len(new_population),
+                                "population_target": self.config.population_size,
+                            },
+                        )
+                        print(
+                            f"[Gen {generation}] mutation budget exhausted after {mutation_attempts} attempt(s); "
+                            f"filling remaining slots with elites."
+                        )
+                        stop_mutation = True
+                    finally:
+                        for future in futures_to_meta:
+                            if not future.done():
+                                future.cancel()
+            finally:
+                mutation_pool.shutdown(wait=False, cancel_futures=True)
+
+            if len(new_population) < self.config.population_size:
+                print(
+                    f"[Gen {generation}] only {len(new_population)}/{self.config.population_size} ready; "
+                    "cloning elites for remaining slots."
+                )
             for _ in range(self.config.population_size - len(new_population)):
                 new_population.append(dict(self.rng.choice(elites)))
 
             population = new_population
 
         best_final = max(population, key=self._candidate_rank_key)
+        best_report = best_overall if best_overall is not None else best_final
         self._append_jsonl(
             self.generation_trace_path,
             {
                 "run_id": self.run_id,
                 "event": "run_end",
                 "time": self._now_iso(),
-                "best_sha": best_final["sha"],
-                "best_fitness": best_final["fitness"],
-                "best_accuracy": float(best_final.get("answer_accuracy", 0.0)),
-                "best_selection_score": float(best_final.get("selection_score", 0.0)),
+                "best_sha": best_report["sha"],
+                "best_fitness": best_report["fitness"],
+                "best_accuracy": float(best_report.get("answer_accuracy", 0.0)),
+                "best_selection_score": float(best_report.get("selection_score", 0.0)),
+                "best_sha_final_population": best_final["sha"],
+                "best_fitness_final_population": best_final["fitness"],
             },
         )
         return {
             "run_id": self.run_id,
-            "best_sha": best_final["sha"],
-            "best_fitness": best_final["fitness"],
-            "best_accuracy": float(best_final.get("answer_accuracy", 0.0)),
-            "best_selection_score": float(best_final.get("selection_score", 0.0)),
+            "best_sha": best_report["sha"],
+            "best_fitness": best_report["fitness"],
+            "best_accuracy": float(best_report.get("answer_accuracy", 0.0)),
+            "best_selection_score": float(best_report.get("selection_score", 0.0)),
             "history": history,
             "mode": self.config.mode,
             "log_files": {
@@ -394,6 +579,8 @@ class EvolutionEngine:
         compilation_success_count = 0
         execution_success_count = 0
         test_pass_rate_values: list[float] = []
+        sanitized_test_drop_count_total = 0
+        raw_test_count_total = 0
 
         for task_idx, task in enumerate(sampled, start=1):
             record = TaskRecord(
@@ -493,6 +680,19 @@ class EvolutionEngine:
                         tpr = float(result.metadata.get("test_pass_rate", 0.0))
                         record.metadata["test_pass_rate"] = tpr
                         test_pass_rate_values.append(tpr)
+                        dropped = int(result.metadata.get("sanitized_test_drop_count", 0) or 0)
+                        raw_tests = int(result.metadata.get("raw_test_count", 0) or 0)
+                        record.metadata["sanitized_test_drop_count"] = max(0, dropped)
+                        record.metadata["raw_test_count"] = max(0, raw_tests)
+                        sanitized_test_drop_count_total += max(0, dropped)
+                        raw_test_count_total += max(0, raw_tests)
+
+                if (
+                    int(record.tokens_used) <= 0
+                    and not str(record.model_output or "").strip()
+                    and not bool(record.verification_passed)
+                ):
+                    worker_status = "empty_output"
 
             self._append_jsonl(
                 self.task_trace_path,
@@ -503,6 +703,10 @@ class EvolutionEngine:
                     "worker_status": worker_status,
                     "worker_seconds": round(worker_seconds, 3),
                     "tokens_used": int(record.tokens_used),
+                    "compilation_success": bool(record.metadata.get("compilation_success", False)),
+                    "execution_success": bool(record.metadata.get("execution_success", False)),
+                    "worker_stage": str(record.metadata.get("stage", "")),
+                    "trace_head": [str(item)[:160] for item in list(record.reasoning_trace)[:3]],
                     **task_info,
                 },
             )
@@ -648,13 +852,32 @@ class EvolutionEngine:
         execution_rate = execution_success_count / total_tasks if (self._is_cas or self._is_tdg) else 1.0
         avg_test_pass_rate = mean(test_pass_rate_values) if test_pass_rate_values else 0.0
 
+        # False-positive verifications: tests passed but judge said wrong.
+        # High false_positive_rate signals tests that mislead the repair loop into
+        # accepting wrong answers, causing the protocol to evolve in the wrong direction.
+        false_positive_count = sum(
+            1 for f in failures if f.get("verification_passed", False)
+        )
+        false_positive_rate = false_positive_count / total_tasks
+        sanitized_test_drop_rate = (
+            float(sanitized_test_drop_count_total) / float(raw_test_count_total)
+            if raw_test_count_total > 0
+            else 0.0
+        )
+
         if self._is_tdg:
             w = self.config.fitness_weights
+            # Only reward test_pass_rate when accuracy > 0.  When accuracy=0,
+            # a high test_pass_rate means tests confidently endorse wrong answers
+            # (false positives), which corrupts the mutation signal.
+            effective_test_pass = avg_test_pass_rate if answer_correctness > 0.0 else 0.0
             fitness = (
-                w.get("answer_correctness", 0.55) * answer_correctness
-                + w.get("test_pass_rate", 0.25) * avg_test_pass_rate
-                + w.get("execution_success", 0.15) * execution_rate
+                w.get("answer_correctness", 0.7) * answer_correctness
+                + w.get("test_pass_rate", 0.15) * effective_test_pass
+                + w.get("execution_success", 0.1) * execution_rate
                 + w.get("compilation_success", 0.05) * compilation_rate
+                - w.get("false_positive_penalty", 0.3) * false_positive_rate
+                - w.get("sanitized_test_drop_penalty", 0.05) * sanitized_test_drop_rate
             )
         elif self._is_cas:
             w = self.config.fitness_weights
@@ -678,6 +901,9 @@ class EvolutionEngine:
             is_cas=self._is_cas or self._is_tdg,
             is_tdg=self._is_tdg,
             test_pass_rate_values=test_pass_rate_values,
+            false_positive_count=false_positive_count,
+            sanitized_test_drop_count=sanitized_test_drop_count_total,
+            raw_test_count=raw_test_count_total,
         )
         return fitness, mode_acc, failures, eval_summary
 
@@ -724,6 +950,9 @@ class EvolutionEngine:
                 f"{base_context}"
             )
         context_payload = "\n\n".join(context_sections)
+        max_context_chars = env_int(["EVO_CONTEXT_PAYLOAD_CHAR_CAP", "CAS_CONTEXT_PAYLOAD_CHAR_CAP"], default=0)
+        if max_context_chars > 0 and len(context_payload) > max_context_chars:
+            context_payload = context_payload[:max_context_chars] + "\n...[truncated]"
         query_payload = (
             "LAST_USER_QUERY:\n"
             f"{str(record.query or '')}\n\n"
@@ -754,6 +983,9 @@ class EvolutionEngine:
                 f"{base_context}"
             )
         context_payload = "\n\n".join(context_sections)
+        max_context_chars = env_int(["EVO_CONTEXT_PAYLOAD_CHAR_CAP", "TDG_CONTEXT_PAYLOAD_CHAR_CAP"], default=0)
+        if max_context_chars > 0 and len(context_payload) > max_context_chars:
+            context_payload = context_payload[:max_context_chars] + "\n...[truncated]"
         query_payload = (
             "LAST_USER_QUERY:\n"
             f"{str(record.query or '')}\n\n"
@@ -814,6 +1046,21 @@ class EvolutionEngine:
         execution_rate = float(eval_summary.get("execution_success_rate", 0.0))
         compilation_rate = float(eval_summary.get("compilation_success_rate", 0.0))
         test_pass_rate = float(eval_summary.get("avg_test_pass_rate", 0.0))
+
+        if self._is_tdg:
+            # Subtract false_positive_rate so protocols whose tests confidently pass
+            # wrong answers rank below protocols with no tests at all.
+            false_positive_rate = float(eval_summary.get("false_positive_rate", 0.0))
+            sanitized_test_drop_rate = float(eval_summary.get("sanitized_test_drop_rate", 0.0))
+            return (
+                accuracy
+                - 0.5 * false_positive_rate
+                - 0.25 * sanitized_test_drop_rate
+                + 1e-3 * float(fitness)
+                + 1e-4 * execution_rate
+                + 1e-5 * compilation_rate
+            )
+
         # Lexicographic preference: accuracy dominates, runtime metrics break ties.
         return (
             accuracy
@@ -1013,6 +1260,9 @@ class EvolutionEngine:
         is_cas: bool = False,
         is_tdg: bool = False,
         test_pass_rate_values: list[float] | None = None,
+        false_positive_count: int = 0,
+        sanitized_test_drop_count: int = 0,
+        raw_test_count: int = 0,
     ) -> dict[str, Any]:
         """Build compact, generation-level failure summary for archive metadata."""
 
@@ -1108,6 +1358,13 @@ class EvolutionEngine:
         if is_tdg and test_pass_rate_values is not None:
             avg_tpr = (sum(test_pass_rate_values) / len(test_pass_rate_values)) if test_pass_rate_values else 0.0
             summary["avg_test_pass_rate"] = float(avg_tpr)
+            summary["false_positive_count"] = int(false_positive_count)
+            summary["false_positive_rate"] = float(false_positive_count) / float(max(1, num_tasks))
+            summary["sanitized_test_drop_count"] = int(sanitized_test_drop_count)
+            summary["raw_test_count"] = int(raw_test_count)
+            summary["sanitized_test_drop_rate"] = (
+                float(sanitized_test_drop_count) / float(max(1, raw_test_count))
+            )
 
         return summary
 
@@ -1174,6 +1431,7 @@ class EvolutionEngine:
                 "answer": str(item.get("answer", ""))[:300],
                 "root_cause": str(feedback.get("root_cause", ""))[:300] if isinstance(feedback, dict) else "",
                 "repair_actions": feedback.get("repair_actions", [])[:3] if isinstance(feedback, dict) else [],
+                "trace_head": [str(step)[:160] for step in list(item.get("trace", []) or [])[:3]],
                 "time": self._now_iso(),
             }
             if self._is_cas or self._is_tdg:

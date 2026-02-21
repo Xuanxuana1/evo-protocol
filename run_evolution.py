@@ -245,10 +245,12 @@ def main() -> None:
         tdg_weights_cfg = {}
     if mode == "tdg":
         fitness_weights = {
-            "answer_correctness": float(tdg_weights_cfg.get("answer_correctness", 0.55)),
-            "test_pass_rate": float(tdg_weights_cfg.get("test_pass_rate", 0.25)),
-            "execution_success": float(tdg_weights_cfg.get("execution_success", 0.15)),
+            "answer_correctness": float(tdg_weights_cfg.get("answer_correctness", 0.7)),
+            "test_pass_rate": float(tdg_weights_cfg.get("test_pass_rate", 0.15)),
+            "execution_success": float(tdg_weights_cfg.get("execution_success", 0.1)),
             "compilation_success": float(tdg_weights_cfg.get("compilation_success", 0.05)),
+            "false_positive_penalty": float(tdg_weights_cfg.get("false_positive_penalty", 0.3)),
+            "sanitized_test_drop_penalty": float(tdg_weights_cfg.get("sanitized_test_drop_penalty", 0.05)),
         }
     else:
         fitness_weights = {

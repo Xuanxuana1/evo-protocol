@@ -35,11 +35,29 @@ from core.token_tracker import TRACKER
 class _TDGCodeSanitizer(ast.NodeTransformer):
     """Strip fragile/forbidden oracle placeholders from generated test code."""
 
+    # Builtins that must not appear in generated test functions.
+    # locals()/globals() cause fragile introspection; exec/eval/compile are
+    # outright dangerous.  Any test_ function that contains one of these is
+    # removed wholesale rather than silently rewritten.
+    _FORBIDDEN_IN_TESTS: frozenset[str] = frozenset(
+        {"locals", "globals", "exec", "eval", "compile"}
+    )
+
     def __init__(self) -> None:
         self.changed = False
 
+    # ------------------------------------------------------------------
+    # Function-level: remove _oracle definitions and unsafe test functions
+    # ------------------------------------------------------------------
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST | None:
         if node.name == "_oracle":
+            self.changed = True
+            return None
+        # Drop test_ functions that use forbidden builtins.  Rewriting them
+        # in-place (e.g. locals() → {}) changes semantics in hard-to-predict
+        # ways; deleting the function is safer — remaining tests still run.
+        if node.name.startswith("test_") and self._contains_forbidden_builtins(node):
             self.changed = True
             return None
         return self.generic_visit(node)
@@ -49,6 +67,44 @@ class _TDGCodeSanitizer(ast.NodeTransformer):
             self.changed = True
             return None
         return self.generic_visit(node)
+
+    def _contains_forbidden_builtins(self, func_node: ast.AST) -> bool:
+        for child in ast.walk(func_node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id in self._FORBIDDEN_IN_TESTS
+            ):
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Import-level: remove any attempt to import _oracle as a module.
+    # _oracle is injected by the runtime; importing it as a module is always
+    # wrong.  We replace with Pass (not None) so that empty try-bodies remain
+    # syntactically valid.
+    # ------------------------------------------------------------------
+
+    def visit_Import(self, node: ast.Import) -> ast.AST:
+        remaining = [a for a in node.names if a.name.split(".", 1)[0] != "_oracle"]
+        if len(remaining) == len(node.names):
+            return self.generic_visit(node)
+        self.changed = True
+        if not remaining:
+            return ast.Pass()
+        node.names = remaining
+        return node
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> ast.AST:
+        module = node.module or ""
+        if module == "_oracle" or module.startswith("_oracle."):
+            self.changed = True
+            return ast.Pass()
+        return self.generic_visit(node)
+
+    # ------------------------------------------------------------------
+    # Assignment-level: remove assignments to _oracle
+    # ------------------------------------------------------------------
 
     def visit_Assign(self, node: ast.Assign) -> ast.AST | None:
         if any(self._is_oracle_target(target) for target in node.targets):
@@ -67,6 +123,10 @@ class _TDGCodeSanitizer(ast.NodeTransformer):
             self.changed = True
             return None
         return self.generic_visit(node)
+
+    # ------------------------------------------------------------------
+    # Misc
+    # ------------------------------------------------------------------
 
     def visit_Raise(self, node: ast.Raise) -> ast.AST:
         if self._is_not_implemented_error(node.exc):
@@ -201,13 +261,24 @@ class BaseTDGCompiler(ABC):
         trace.append(f"[Budget] llm_call_limit={self._max_llm_calls_current}")
 
         # --- Stage 1: Compile tests ---
+        raw_test_count = 0
+        sanitized_test_count = 0
+        sanitized_test_drop_count = 0
         test_code = ""
         test_names: list[str] = []
         compilation_success = False
         try:
             raw_test_code = self.compile_tests(context, query)
+            raw_test_count = len(self._extract_test_names(raw_test_code))
             test_code = self._sanitize_generated_code(raw_test_code)
+            sanitized_test_count = len(self._extract_test_names(test_code))
+            sanitized_test_drop_count = max(0, raw_test_count - sanitized_test_count)
             trace.append(f"[CompileTests] code_len={len(test_code)}")
+            if sanitized_test_drop_count > 0:
+                trace.append(
+                    "[Sanitizer] dropped_tests="
+                    f"{sanitized_test_drop_count} raw={raw_test_count} kept={sanitized_test_count}"
+                )
         except Exception as exc:
             trace.append(f"[CompileTests] error={str(exc)[:200]}")
             test_code = ""
@@ -276,6 +347,9 @@ class BaseTDGCompiler(ABC):
                     "test_pass_rate": 0.0,
                     "test_results": {},
                     "repair_attempts": 0,
+                    "raw_test_count": int(raw_test_count),
+                    "sanitized_test_count": int(sanitized_test_count),
+                    "sanitized_test_drop_count": int(sanitized_test_drop_count),
                 },
                 sandbox_code=test_code,
                 solver_code="",
@@ -342,6 +416,9 @@ class BaseTDGCompiler(ABC):
                 "repair_attempts": repair_attempts,
                 "tests_compiled": True,
                 "num_tests": total_tests,
+                "raw_test_count": int(raw_test_count),
+                "sanitized_test_count": int(sanitized_test_count),
+                "sanitized_test_drop_count": int(sanitized_test_drop_count),
             },
             sandbox_code=test_code,
             solver_code="",

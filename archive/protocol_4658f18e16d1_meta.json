@@ -1,0 +1,108 @@
+{
+  "sha": "4658f18e16d1",
+  "generation": 0,
+  "parent_sha": null,
+  "score": 0.5994551973684211,
+  "visit_count": 47,
+  "seen_generations": [
+    0
+  ],
+  "eval_count": 34,
+  "last_evaluated_generation": 2,
+  "best_score": 0.834335492982456,
+  "last_failure_summary": {
+    "num_tasks": 4,
+    "num_failures": 1,
+    "fitness": 0.6634868421052631,
+    "failure_rate": 0.25,
+    "accuracy": 0.75,
+    "avg_tokens_per_task": 70157.5,
+    "max_tokens_per_task": 149698,
+    "token_efficiency": 1.0690232690731567e-05,
+    "fitness_token_efficiency": 9.457104972458583e-06,
+    "verification_failed_count": 0,
+    "attention_drift_mean": null,
+    "attention_drift_high_rate": null,
+    "attention_drift_measured_tasks": 0,
+    "failure_mode_counts": {
+      "F1": 1
+    },
+    "top_root_causes": [
+      "Answer does not satisfy all rubric constraints based on judge feedback."
+    ],
+    "top_repair_actions": [
+      "Improve perception granularity for long context sections.",
+      "Add intermediate reasoning checks before final synthesis."
+    ],
+    "top_unsatisfied_rubrics": [
+      "The response should not explain examples other than ones in the excerpt below:\r\n\\subsubsection{Zeroth order system: magnetic rotating shallow water equations}\\label{sec4.4.1}\r\n%=================================\r\nUsing..."
+    ],
+    "compilation_success_rate": 0.75,
+    "execution_success_rate": 1.0,
+    "compilation_failure_count": 1,
+    "execution_failure_count": 0,
+    "top_compilation_errors": [],
+    "top_execution_errors": [],
+    "avg_test_pass_rate": 0.5416666666666666,
+    "false_positive_count": 1,
+    "false_positive_rate": 0.25,
+    "sanitized_test_drop_count": 4,
+    "raw_test_count": 38,
+    "sanitized_test_drop_rate": 0.10526315789473684
+  },
+  "evaluation_history": [
+    {
+      "generation": 1,
+      "score": -0.24989,
+      "num_tasks": 4,
+      "num_failures": 4,
+      "failure_rate": 1.0,
+      "token_efficiency": 0.0,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F1": 4
+      },
+      "top_root_causes": [
+        "Answer does not satisfy all rubric constraints based on judge feedback.",
+        "Candidate answer failed protocol verification; likely context-faithfulness issue."
+      ]
+    },
+    {
+      "generation": 2,
+      "score": 0.5994551973684211,
+      "num_tasks": 4,
+      "num_failures": 1,
+      "failure_rate": 0.25,
+      "token_efficiency": 1.0690232690731567e-05,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F1": 1
+      },
+      "top_root_causes": [
+        "Answer does not satisfy all rubric constraints based on judge feedback."
+      ]
+    },
+    {
+      "generation": 3,
+      "score": 0.6675820402046783,
+      "num_tasks": 6,
+      "num_failures": 2,
+      "failure_rate": 0.33333333333333337,
+      "token_efficiency": 2.1836325819817556e-05,
+      "attention_drift_mean": null,
+      "attention_drift_high_rate": null,
+      "attention_drift_measured_tasks": 0,
+      "failure_mode_counts": {
+        "F1": 2
+      },
+      "top_root_causes": [
+        "Clark failed to escalate to Human Supervisor when confidence (0.44) fell below the 0.45 threshold, and did not validate incoming payload against the ARTICLE_DATA_OBJECT schema. The model followed its own judgment (issuing REVISION_REQUIRED) rather than executing the explicit procedural rules defined in the context.",
+        "The model generated a critique that followed a generic template pattern (identifying issues and providing general routing) but failed to incorporate the specific contextual requirement from the rubric: each of the 8 issues must have explicit per-issue agent identification (Analyst vs Coder). The model had access to this requirement in the context but prioritized prior knowledge of what a typica..."
+      ]
+    }
+  ]
+}

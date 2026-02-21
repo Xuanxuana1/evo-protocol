@@ -836,7 +836,9 @@ class SandboxProtocolLoader:
 # TDG protocol loader (Test-Driven Generation mode)
 # ---------------------------------------------------------------------------
 
-TDG_ALLOWED_IMPORTS = SANDBOX_ALLOWED_IMPORTS
+TDG_ALLOWED_IMPORTS = SANDBOX_ALLOWED_IMPORTS | {
+    "core.base_tdg_protocol",
+}
 
 
 def _run_tdg_protocol_in_subprocess(
@@ -1014,6 +1016,11 @@ class TDGProtocolLoader:
                 for item in node.body
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
+            method_nodes = {
+                item.name: item
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
 
             required = {"compile_tests", "generate_answer"}
             missing = sorted(required - methods)
@@ -1035,6 +1042,97 @@ class TDGProtocolLoader:
                     ),
                     fixable=True,
                 )
+
+            def _calls_self_method(func_node: ast.AST, method_name: str) -> bool:
+                for child in ast.walk(func_node):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    func = child.func
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "self"
+                        and func.attr == method_name
+                    ):
+                        return True
+                return False
+
+            compile_node = method_nodes.get("compile_tests")
+            if compile_node is not None and not _calls_self_method(compile_node, "_call_llm"):
+                return ValidationError(
+                    stage="contract",
+                    message=(
+                        f"TDG subclass {node.name} compile_tests() must call self._call_llm "
+                        "to synthesize task-specific tests."
+                    ),
+                    fixable=True,
+                )
+
+            answer_node = method_nodes.get("generate_answer")
+            if answer_node is not None and not _calls_self_method(answer_node, "_call_llm"):
+                return ValidationError(
+                    stage="contract",
+                    message=(
+                        f"TDG subclass {node.name} generate_answer() must call self._call_llm "
+                        "to synthesize grounded answers."
+                    ),
+                    fixable=True,
+                )
+
+            # Reject calls to self.* helper methods that are not defined in the
+            # class and not part of the BaseTDGCompiler public interface.
+            # Example failure: self._extract_code() called but never defined →
+            # passes contract check but raises AttributeError at runtime.
+            _ALLOWED_SELF_ATTRS = {
+                # BaseTDGCompiler callable methods
+                "_call_llm", "_prepare_prompt_text", "_call_budget",
+                "_build_test_runner", "_run_tests", "_extract_test_names",
+                "_sanitize_generated_code", "_is_syntax_error",
+                "_attempt_syntax_repair", "_answer_with_oracle_fallback",
+                "_make_oracle_fn", "_derive_dynamic_call_budget",
+                "_repair_answer", "_is_transient_llm_error",
+                "_extract_max_tokens_cap",
+                # Instance attributes (non-callable, but accessed via self.attr)
+                "llm", "model", "context_char_limit", "query_char_limit",
+                "max_completion_tokens", "oracle_max_completion_tokens",
+                "api_timeout_seconds", "sandbox_timeout_seconds",
+                "_call_count", "_task_tokens_used", "_oracle_call_count",
+                "_max_llm_calls_current",
+            }
+            class_defined = set(method_nodes.keys())
+            allowed_attrs = _ALLOWED_SELF_ATTRS | class_defined
+
+            def _collect_self_attr_calls(func_node: ast.AST) -> set[str]:
+                """Collect names of all self.<name>(...) call sites."""
+                called: set[str] = set()
+                for child in ast.walk(func_node):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    func_ref = child.func
+                    if (
+                        isinstance(func_ref, ast.Attribute)
+                        and isinstance(func_ref.value, ast.Name)
+                        and func_ref.value.id == "self"
+                    ):
+                        called.add(func_ref.attr)
+                return called
+
+            for evolvable_method in ("compile_tests", "generate_answer"):
+                fn = method_nodes.get(evolvable_method)
+                if fn is None:
+                    continue
+                for attr in _collect_self_attr_calls(fn):
+                    if attr not in allowed_attrs:
+                        return ValidationError(
+                            stage="contract",
+                            message=(
+                                f"TDG subclass {node.name}.{evolvable_method}() calls "
+                                f"self.{attr}() which is not defined in the class or "
+                                "in the BaseTDGCompiler interface. Define the helper "
+                                "inside the class or use an allowed base method."
+                            ),
+                            fixable=True,
+                        )
 
         return None
 
