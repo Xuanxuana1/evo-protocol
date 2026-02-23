@@ -268,6 +268,9 @@ class BaseTDGCompiler(ABC):
         raw_test_count = 0
         sanitized_test_count = 0
         sanitized_test_drop_count = 0
+        adversarial_passed_tests = 0
+        adversarial_total_tests = 0
+        adversarial_test_pass_rate = 0.0
         test_code = ""
         test_names: list[str] = []
         compilation_success = False
@@ -356,6 +359,9 @@ class BaseTDGCompiler(ABC):
                     "raw_test_count": int(raw_test_count),
                     "sanitized_test_count": int(sanitized_test_count),
                     "sanitized_test_drop_count": int(sanitized_test_drop_count),
+                    "adversarial_passed_tests": int(adversarial_passed_tests),
+                    "adversarial_total_tests": int(adversarial_total_tests),
+                    "adversarial_test_pass_rate": float(adversarial_test_pass_rate),
                 },
                 sandbox_code=test_code,
                 solver_code="",
@@ -365,6 +371,24 @@ class BaseTDGCompiler(ABC):
             )
 
         # --- Stage 3: Verify ---
+        adversarial_answer = self._build_adversarial_answer(context=context, query=query)
+        adversarial_results = self._run_tests(
+            test_code,
+            adversarial_answer,
+            test_names,
+            sandbox_timeout,
+        )
+        adversarial_total_tests = len(adversarial_results)
+        adversarial_passed_tests = sum(1 for passed in adversarial_results.values() if passed)
+        adversarial_test_pass_rate = (
+            adversarial_passed_tests / adversarial_total_tests if adversarial_total_tests > 0 else 0.0
+        )
+        trace.append(
+            "[AdversarialCheck] pass_rate="
+            f"{adversarial_test_pass_rate:.2f} "
+            f"passed={adversarial_passed_tests}/{adversarial_total_tests}"
+        )
+
         test_results = self._run_tests(test_code, draft, test_names, sandbox_timeout)
         trace.append(f"[Verify] results={test_results}")
 
@@ -427,6 +451,9 @@ class BaseTDGCompiler(ABC):
                 "raw_test_count": int(raw_test_count),
                 "sanitized_test_count": int(sanitized_test_count),
                 "sanitized_test_drop_count": int(sanitized_test_drop_count),
+                "adversarial_passed_tests": int(adversarial_passed_tests),
+                "adversarial_total_tests": int(adversarial_total_tests),
+                "adversarial_test_pass_rate": float(adversarial_test_pass_rate),
             },
             sandbox_code=test_code,
             solver_code="",
@@ -555,6 +582,19 @@ class BaseTDGCompiler(ABC):
         if total_chars >= 45000:
             return min(max(base_budget, 20), 32)
         return base_budget
+
+    @staticmethod
+    def _build_adversarial_answer(context: str, query: str) -> str:
+        """Create an intentionally context-agnostic answer to sanity-check tests."""
+
+        query_head = str(query or "").strip().splitlines()[0][:120]
+        context_hint = str(context or "").strip().splitlines()[0][:80]
+        return (
+            "This answer intentionally ignores the provided context and relies on generic prior knowledge. "
+            "It should fail strict context-grounded verification tests. "
+            f"Query hint: {query_head}. Context hint ignored: {context_hint}. "
+            "Defaulting to common world assumptions even if they conflict with the prompt."
+        )
 
     def _call_budget(self) -> int:
         return max(1, int(getattr(self, "_max_llm_calls_current", self.max_llm_calls_per_task)))

@@ -129,6 +129,9 @@ class ProtocolArchive:
                 "attention_drift_high_rate": failure_summary.get("attention_drift_high_rate"),
                 "attention_drift_measured_tasks": int(failure_summary.get("attention_drift_measured_tasks", 0)),
                 "failure_mode_counts": dict(failure_summary.get("failure_mode_counts", {})),
+                "avg_test_pass_rate": float(failure_summary.get("avg_test_pass_rate", 0.0)),
+                "false_positive_rate": float(failure_summary.get("false_positive_rate", 0.0)),
+                "adversarial_test_pass_rate": float(failure_summary.get("adversarial_test_pass_rate", 0.0)),
                 "top_root_causes": list(failure_summary.get("top_root_causes", [])),
             }
             existing_idx = next(

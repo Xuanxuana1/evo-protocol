@@ -96,11 +96,40 @@ def main() -> None:
     parser.add_argument(
         "--init-population-size",
         type=int,
-        default=1,
-        help="Initial population size at Gen1 (1=tree-like growth from seed; 0 means use --population-size)",
+        default=0,
+        help="Initial population size at Gen1 (0 means use --population-size)",
+    )
+    parser.add_argument(
+        "--disable-init-diversify",
+        action="store_true",
+        help="Disable mutation-based diversification when init_population_size > 1",
+    )
+    parser.add_argument(
+        "--init-mutation-attempts",
+        type=int,
+        default=2,
+        help="Mutation attempts per slot when diversifying initial population",
     )
     parser.add_argument("--elite-count", type=int, default=2)
     parser.add_argument("--tasks-per-eval", type=int, default=20)
+    parser.add_argument(
+        "--task-overlap-ratio",
+        type=float,
+        default=0.5,
+        help="Fraction of dynamic tasks retained from previous generation [0,1]",
+    )
+    parser.add_argument(
+        "--calibration-tasks",
+        type=int,
+        default=0,
+        help="Fixed calibration task count included every generation",
+    )
+    parser.add_argument(
+        "--elite-score-current-weight",
+        type=float,
+        default=0.7,
+        help="Weight of current score when blending with same-SHA history [0,1]",
+    )
     parser.add_argument("--failure-samples-per-mutation", type=int, default=5)
     parser.add_argument("--archive-dir", default="archive")
     parser.add_argument("--max-repair-attempts", type=int, default=2)
@@ -159,6 +188,16 @@ def main() -> None:
     )
     elite_count = int(resolve_cli_or_config("elite_count", evolution_cfg.get("elite_count")))
     tasks_per_eval = int(resolve_cli_or_config("tasks_per_eval", evolution_cfg.get("tasks_per_evaluation")))
+    task_overlap_ratio = float(resolve_cli_or_config("task_overlap_ratio", evolution_cfg.get("task_overlap_ratio")))
+    calibration_tasks = int(
+        resolve_cli_or_config("calibration_tasks", evolution_cfg.get("calibration_tasks_per_evaluation"))
+    )
+    elite_score_current_weight = float(
+        resolve_cli_or_config("elite_score_current_weight", evolution_cfg.get("elite_score_current_weight"))
+    )
+    init_mutation_attempts = int(
+        resolve_cli_or_config("init_mutation_attempts", evolution_cfg.get("init_population_mutation_attempts"))
+    )
     failure_samples_per_mutation = int(
         resolve_cli_or_config("failure_samples_per_mutation", evolution_cfg.get("failure_samples_per_mutation"))
     )
@@ -178,17 +217,30 @@ def main() -> None:
     selection_tau = float(resolve_cli_or_config("selection_tau", selection_cfg.get("tau")))
     selection_alpha = float(resolve_cli_or_config("selection_alpha", selection_cfg.get("alpha")))
 
-    if population_size < 6 or tasks_per_eval < 10:
+    if population_size < 6 or tasks_per_eval < 20:
         print(
             "[Warn] Evolution search space is very small "
             f"(population_size={population_size}, tasks_per_eval={tasks_per_eval}). "
-            "For meaningful evolution, prefer population_size>=6 and tasks_per_eval>=10."
+            "For meaningful evolution, prefer population_size>=6 and tasks_per_eval>=20."
         )
     if init_population_size == 1 and generations < 2:
         print(
             "[Warn] init_population_size=1 with generations<2 evaluates only the root "
             "protocol and will not show mutation expansion."
         )
+    task_overlap_ratio = max(0.0, min(1.0, task_overlap_ratio))
+    calibration_tasks = max(0, calibration_tasks)
+    elite_score_current_weight = max(0.0, min(1.0, elite_score_current_weight))
+    init_mutation_attempts = max(1, init_mutation_attempts)
+
+    disable_init_diversify = bool(args.disable_init_diversify)
+    disable_init_diversify_flag = "--disable-init-diversify"
+    disable_init_diversify_provided = any(
+        token == disable_init_diversify_flag or token.startswith(f"{disable_init_diversify_flag}=")
+        for token in sys.argv[1:]
+    )
+    if not disable_init_diversify_provided:
+        disable_init_diversify = not bool(evolution_cfg.get("enable_init_population_diversify", True))
 
     worker_model = (
         resolve_cli_or_config("worker_model", evolution_cfg.get("worker_model"))
@@ -249,8 +301,9 @@ def main() -> None:
             "test_pass_rate": float(tdg_weights_cfg.get("test_pass_rate", 0.15)),
             "execution_success": float(tdg_weights_cfg.get("execution_success", 0.1)),
             "compilation_success": float(tdg_weights_cfg.get("compilation_success", 0.05)),
-            "false_positive_penalty": float(tdg_weights_cfg.get("false_positive_penalty", 0.3)),
+            "false_positive_penalty": float(tdg_weights_cfg.get("false_positive_penalty", 0.5)),
             "sanitized_test_drop_penalty": float(tdg_weights_cfg.get("sanitized_test_drop_penalty", 0.05)),
+            "adversarial_test_pass_penalty": float(tdg_weights_cfg.get("adversarial_test_pass_penalty", 0.2)),
         }
     else:
         fitness_weights = {
@@ -338,6 +391,11 @@ def main() -> None:
         seed=seed,
         mode=mode,
         init_population_size=init_population_size,
+        init_population_diversify=not disable_init_diversify,
+        init_population_mutation_attempts=init_mutation_attempts,
+        task_overlap_ratio=task_overlap_ratio,
+        calibration_tasks_per_evaluation=calibration_tasks,
+        elite_score_current_weight=elite_score_current_weight,
         sandbox_timeout_seconds=sandbox_timeout,
         selection_tau=selection_tau,
         selection_alpha=selection_alpha,

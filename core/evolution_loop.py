@@ -44,7 +44,12 @@ class EvolutionConfig:
     max_repair_attempts: int = 2
     seed: int = 42
     mode: str = "cas"
-    init_population_size: int = 1
+    init_population_size: int = 0
+    init_population_diversify: bool = True
+    init_population_mutation_attempts: int = 2
+    task_overlap_ratio: float = 0.5
+    calibration_tasks_per_evaluation: int = 0
+    elite_score_current_weight: float = 0.7
     sandbox_timeout_seconds: int = 30
     selection_tau: float = 0.5
     selection_alpha: float = 0.5
@@ -88,7 +93,34 @@ class EvolutionEngine:
         )
         self.config.selection_tau = max(1e-6, float(self.config.selection_tau))
         self.config.selection_alpha = max(0.0, float(self.config.selection_alpha))
+        self.config.task_overlap_ratio = max(0.0, min(1.0, float(self.config.task_overlap_ratio)))
+        self.config.calibration_tasks_per_evaluation = max(0, int(self.config.calibration_tasks_per_evaluation))
+        self.config.elite_score_current_weight = max(0.0, min(1.0, float(self.config.elite_score_current_weight)))
+        self.config.init_population_mutation_attempts = max(1, int(self.config.init_population_mutation_attempts))
         self.rng = random.Random(self.config.seed)
+        self._task_lookup: dict[str, TaskRecord] = {}
+        for task in self.tasks:
+            task_id = str(task.task_id)
+            if task_id and task_id not in self._task_lookup:
+                self._task_lookup[task_id] = task
+        self._task_ids = list(self._task_lookup.keys())
+        calibration_count = min(self.config.calibration_tasks_per_evaluation, len(self._task_ids))
+        if calibration_count > 0:
+            calibration_rng = random.Random(f"{self.config.seed}:calibration")
+            self._calibration_task_ids = calibration_rng.sample(self._task_ids, calibration_count)
+        else:
+            self._calibration_task_ids: list[str] = []
+        self._previous_dynamic_task_ids: list[str] = []
+        self._last_task_sample_meta: dict[str, Any] = {
+            "requested_sample_size": 0,
+            "selected_count": 0,
+            "calibration_count": 0,
+            "overlap_count": 0,
+            "fresh_count": 0,
+            "task_ids": [],
+        }
+        self._selection_history_by_sha: dict[str, list[float]] = {}
+        self._selection_history_generations: dict[str, set[int]] = {}
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.logs_dir = self.archive.dir / "_logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -117,29 +149,22 @@ class EvolutionEngine:
         if init_population_size <= 0:
             init_population_size = self.config.population_size
         init_population_size = max(1, min(init_population_size, self.config.population_size))
+        self._previous_dynamic_task_ids = []
+        self._selection_history_by_sha = {}
+        self._selection_history_generations = {}
 
         init_sha = self.archive.save(initial_code, generation=0, score=None)
-        base_candidate = {
-            "sha": init_sha,
-            "code": initial_code,
-            "protocol": protocol,
-            "fitness": 0.0,
-            "mode_accuracy": {},
-            "failures": [],
-        }
-        population = [dict(base_candidate)]
-        for _ in range(init_population_size - 1):
-            cloned_protocol, _ = self.loader.load_from_code(initial_code)
-            population.append(
-                {
-                    "sha": init_sha,
-                    "code": initial_code,
-                    "protocol": cloned_protocol if cloned_protocol is not None else protocol,
-                    "fitness": 0.0,
-                    "mode_accuracy": {},
-                    "failures": [],
-                }
-            )
+        print(
+            "[Init] preparing initial population "
+            f"target={init_population_size} "
+            f"diversify={'on' if self.config.init_population_diversify else 'off'}"
+        )
+        population = self._build_initial_population(
+            initial_code=initial_code,
+            initial_protocol=protocol,
+            init_sha=init_sha,
+            init_population_size=init_population_size,
+        )
 
         history: list[dict[str, Any]] = []
         best_overall: dict[str, Any] | None = None
@@ -152,8 +177,13 @@ class EvolutionEngine:
                 "generations": self.config.generations,
                 "population_size": self.config.population_size,
                 "init_population_size": init_population_size,
+                "init_population_diversify": bool(self.config.init_population_diversify),
+                "init_population_mutation_attempts": int(self.config.init_population_mutation_attempts),
                 "elite_count": self.config.elite_count,
                 "tasks_per_evaluation": self.config.tasks_per_evaluation,
+                "task_overlap_ratio": self.config.task_overlap_ratio,
+                "calibration_tasks_per_evaluation": self.config.calibration_tasks_per_evaluation,
+                "elite_score_current_weight": self.config.elite_score_current_weight,
                 "benchmark": getattr(self.benchmark, "name", "unknown"),
                 "mode": self.config.mode,
                 "selection_tau": self.config.selection_tau,
@@ -163,8 +193,26 @@ class EvolutionEngine:
 
         for generation in range(1, self.config.generations + 1):
             print(f"\n[Gen {generation}] evaluating {len(population)} protocols (mode={self.config.mode})...")
-            sampled_tasks = self._sample_tasks(self.config.tasks_per_evaluation)
+            sampled_tasks = self._sample_tasks(self.config.tasks_per_evaluation, generation=generation)
+            sample_meta = dict(self._last_task_sample_meta)
+            print(
+                f"[Gen {generation}] task sample selected={sample_meta.get('selected_count', 0)} "
+                f"calibration={sample_meta.get('calibration_count', 0)} "
+                f"overlap={sample_meta.get('overlap_count', 0)} "
+                f"fresh={sample_meta.get('fresh_count', 0)}"
+            )
+            self._append_jsonl(
+                self.generation_trace_path,
+                {
+                    "run_id": self.run_id,
+                    "event": "task_sampling",
+                    "time": self._now_iso(),
+                    "generation": generation,
+                    **sample_meta,
+                },
+            )
             generation_eval_cache: dict[str, tuple[float, dict[str, float], list[dict[str, Any]], dict[str, Any], int]] = {}
+            stabilized_selection_cache: dict[str, tuple[float, float]] = {}
 
             # Phase 1 (parallel): evaluate each unique candidate code once.
             # Duplicated elite clones (same SHA) reuse the same evaluation result.
@@ -246,10 +294,21 @@ class EvolutionEngine:
                 candidate["failures"] = failures
                 candidate["eval_summary"] = eval_summary
                 candidate["answer_accuracy"] = float(eval_summary.get("accuracy", 0.0))
-                candidate["selection_score"] = self._compute_selection_score(
-                    fitness=fitness,
-                    eval_summary=eval_summary,
-                )
+                if eval_key in stabilized_selection_cache:
+                    raw_selection_score, selection_score = stabilized_selection_cache[eval_key]
+                else:
+                    raw_selection_score = self._compute_selection_score(
+                        fitness=fitness,
+                        eval_summary=eval_summary,
+                    )
+                    selection_score = self._stabilize_selection_score(
+                        candidate_sha=candidate_sha,
+                        raw_selection_score=raw_selection_score,
+                        generation=generation,
+                    )
+                    stabilized_selection_cache[eval_key] = (raw_selection_score, selection_score)
+                candidate["raw_selection_score"] = float(raw_selection_score)
+                candidate["selection_score"] = float(selection_score)
                 self.archive.update_evaluation(
                     sha=candidate["sha"],
                     generation=generation,
@@ -264,6 +323,7 @@ class EvolutionEngine:
                     "sha": candidate["sha"],
                     "fitness": fitness,
                     "accuracy": candidate["answer_accuracy"],
+                    "raw_selection_score": candidate.get("raw_selection_score", candidate["selection_score"]),
                     "selection_score": candidate["selection_score"],
                     "num_failures": len(failures),
                     "failure_mode_counts": eval_summary.get("failure_mode_counts", {}),
@@ -280,6 +340,7 @@ class EvolutionEngine:
                     candidate_log["avg_test_pass_rate"] = eval_summary.get("avg_test_pass_rate", 0.0)
                     candidate_log["sanitized_test_drop_rate"] = eval_summary.get("sanitized_test_drop_rate", 0.0)
                     candidate_log["false_positive_rate"] = eval_summary.get("false_positive_rate", 0.0)
+                    candidate_log["adversarial_test_pass_rate"] = eval_summary.get("adversarial_test_pass_rate", 0.0)
 
                 self._append_jsonl(self.candidate_trace_path, candidate_log)
                 print(
@@ -679,6 +740,7 @@ class EvolutionEngine:
         compilation_success_count = 0
         execution_success_count = 0
         test_pass_rate_values: list[float] = []
+        adversarial_test_pass_rate_values: list[float] = []
         sanitized_test_drop_count_total = 0
         raw_test_count_total = 0
         task_rng = random.Random(f"{self.config.seed}:{generation}:{candidate_sha}:{candidate_index}")
@@ -790,6 +852,10 @@ class EvolutionEngine:
                         tpr = float(result.metadata.get("test_pass_rate", 0.0))
                         record.metadata["test_pass_rate"] = tpr
                         test_pass_rate_values.append(tpr)
+                        adv_tpr = float(result.metadata.get("adversarial_test_pass_rate", 0.0) or 0.0)
+                        adv_tpr = max(0.0, min(1.0, adv_tpr))
+                        record.metadata["adversarial_test_pass_rate"] = adv_tpr
+                        adversarial_test_pass_rate_values.append(adv_tpr)
                         dropped = int(result.metadata.get("sanitized_test_drop_count", 0) or 0)
                         raw_tests = int(result.metadata.get("raw_test_count", 0) or 0)
                         record.metadata["sanitized_test_drop_count"] = max(0, dropped)
@@ -973,6 +1039,9 @@ class EvolutionEngine:
         compilation_rate = compilation_success_count / total_tasks if (self._is_cas or self._is_tdg) else 1.0
         execution_rate = execution_success_count / total_tasks if (self._is_cas or self._is_tdg) else 1.0
         avg_test_pass_rate = mean(test_pass_rate_values) if test_pass_rate_values else 0.0
+        avg_adversarial_test_pass_rate = (
+            mean(adversarial_test_pass_rate_values) if adversarial_test_pass_rate_values else 0.0
+        )
 
         # False-positive verifications: tests passed but judge said wrong.
         # High false_positive_rate signals tests that mislead the repair loop into
@@ -998,8 +1067,9 @@ class EvolutionEngine:
                 + w.get("test_pass_rate", 0.15) * effective_test_pass
                 + w.get("execution_success", 0.1) * execution_rate
                 + w.get("compilation_success", 0.05) * compilation_rate
-                - w.get("false_positive_penalty", 0.3) * false_positive_rate
+                - w.get("false_positive_penalty", 0.5) * false_positive_rate
                 - w.get("sanitized_test_drop_penalty", 0.05) * sanitized_test_drop_rate
+                - w.get("adversarial_test_pass_penalty", 0.2) * avg_adversarial_test_pass_rate
             )
         elif self._is_cas:
             w = self.config.fitness_weights
@@ -1023,6 +1093,7 @@ class EvolutionEngine:
             is_cas=self._is_cas or self._is_tdg,
             is_tdg=self._is_tdg,
             test_pass_rate_values=test_pass_rate_values,
+            adversarial_test_pass_rate_values=adversarial_test_pass_rate_values,
             false_positive_count=false_positive_count,
             sanitized_test_drop_count=sanitized_test_drop_count_total,
             raw_test_count=raw_test_count_total,
@@ -1131,10 +1202,255 @@ class EvolutionEngine:
                 return True
         return False
 
-    def _sample_tasks(self, sample_size: int) -> list[TaskRecord]:
-        if sample_size >= len(self.tasks):
-            return list(self.tasks)
-        return self.rng.sample(self.tasks, sample_size)
+    def _sample_tasks(self, sample_size: int, generation: int) -> list[TaskRecord]:
+        if not self._task_ids:
+            self._last_task_sample_meta = {
+                "requested_sample_size": int(sample_size),
+                "selected_count": 0,
+                "calibration_count": 0,
+                "overlap_count": 0,
+                "fresh_count": 0,
+                "task_ids": [],
+            }
+            self._previous_dynamic_task_ids = []
+            return []
+
+        requested = max(1, int(sample_size))
+        selected_count = min(requested, len(self._task_ids))
+        if selected_count >= len(self._task_ids):
+            selected_ids = list(self._task_ids)
+            calibration_ids = [task_id for task_id in self._calibration_task_ids if task_id in self._task_lookup]
+            calibration_set = set(calibration_ids)
+            dynamic_ids = [task_id for task_id in selected_ids if task_id not in calibration_set]
+            overlap_count = len({task_id for task_id in dynamic_ids if task_id in self._previous_dynamic_task_ids})
+            fresh_count = max(0, len(dynamic_ids) - overlap_count)
+            self._previous_dynamic_task_ids = list(dynamic_ids)
+            self._last_task_sample_meta = {
+                "requested_sample_size": int(sample_size),
+                "selected_count": len(selected_ids),
+                "calibration_count": len(calibration_ids),
+                "overlap_count": int(overlap_count),
+                "fresh_count": int(fresh_count),
+                "task_ids": list(selected_ids),
+            }
+            return [self._task_lookup[task_id] for task_id in selected_ids]
+
+        calibration_ids = [task_id for task_id in self._calibration_task_ids if task_id in self._task_lookup]
+        if len(calibration_ids) > selected_count:
+            calibration_ids = calibration_ids[:selected_count]
+        calibration_set = set(calibration_ids)
+
+        dynamic_target = max(0, selected_count - len(calibration_ids))
+        overlap_count = 0
+        overlap_ids: list[str] = []
+        if generation > 1 and dynamic_target > 0 and self._previous_dynamic_task_ids:
+            previous_pool = [task_id for task_id in self._previous_dynamic_task_ids if task_id in self._task_lookup]
+            overlap_target = int(round(dynamic_target * self.config.task_overlap_ratio))
+            overlap_target = max(0, min(overlap_target, len(previous_pool), dynamic_target))
+            if overlap_target > 0:
+                overlap_ids = self.rng.sample(previous_pool, overlap_target)
+                overlap_count = len(overlap_ids)
+
+        selected_dynamic_set = set(overlap_ids)
+        available_fresh_pool = [
+            task_id
+            for task_id in self._task_ids
+            if task_id not in calibration_set and task_id not in selected_dynamic_set
+        ]
+        fresh_needed = max(0, dynamic_target - overlap_count)
+        fresh_count = min(fresh_needed, len(available_fresh_pool))
+        fresh_ids = self.rng.sample(available_fresh_pool, fresh_count) if fresh_count > 0 else []
+
+        selected_ids = calibration_ids + overlap_ids + fresh_ids
+
+        if len(selected_ids) < selected_count:
+            remaining_pool = [task_id for task_id in self._task_ids if task_id not in set(selected_ids)]
+            top_up_count = min(selected_count - len(selected_ids), len(remaining_pool))
+            if top_up_count > 0:
+                selected_ids.extend(self.rng.sample(remaining_pool, top_up_count))
+
+        dynamic_ids = [task_id for task_id in selected_ids if task_id not in calibration_set]
+        self._previous_dynamic_task_ids = list(dynamic_ids)
+        self._last_task_sample_meta = {
+            "requested_sample_size": int(sample_size),
+            "selected_count": len(selected_ids),
+            "calibration_count": len(calibration_ids),
+            "overlap_count": int(overlap_count),
+            "fresh_count": int(max(0, len(dynamic_ids) - overlap_count)),
+            "task_ids": list(selected_ids),
+        }
+        return [self._task_lookup[task_id] for task_id in selected_ids if task_id in self._task_lookup]
+
+    def _build_initial_population(
+        self,
+        initial_code: str,
+        initial_protocol,
+        init_sha: str,
+        init_population_size: int,
+    ) -> list[dict[str, Any]]:
+        base_candidate = {
+            "sha": init_sha,
+            "code": initial_code,
+            "protocol": initial_protocol,
+            "fitness": 0.0,
+            "selection_score": 0.0,
+            "answer_accuracy": 0.0,
+            "mode_accuracy": {},
+            "failures": [],
+        }
+        population = [dict(base_candidate)]
+        if init_population_size <= 1:
+            print("[Init] single-seed population ready (1/1)")
+            return population
+
+        diversify = bool(getattr(self.config, "init_population_diversify", True))
+        attempts_per_slot = max(1, int(getattr(self.config, "init_population_mutation_attempts", 2)))
+        seen_shas = {init_sha}
+        seed_perf = ParentPerformance(
+            overall=0.0,
+            f1=0.0,
+            f2=0.0,
+            f3=0.0,
+            f4=0.0,
+            compilation_success_rate=1.0,
+            execution_success_rate=1.0,
+        )
+        repair_temp = 0.05
+
+        for slot in range(1, init_population_size):
+            print(f"[Init] slot {slot + 1}/{init_population_size}")
+            accepted_candidate: dict[str, Any] | None = None
+            if diversify:
+                for attempt in range(attempts_per_slot):
+                    mutation_attempt = ((slot - 1) * attempts_per_slot) + attempt + 1
+                    arch_temp = min(0.75, 0.35 + 0.08 * slot + 0.05 * attempt)
+                    print(
+                        f"[Init] mutate attempt {attempt + 1}/{attempts_per_slot} "
+                        f"temp={arch_temp:.2f}"
+                    )
+                    try:
+                        child_protocol, child_code_or_error = self.meta_architect.mutate(
+                            loader=self.loader,
+                            generation=0,
+                            mutation_attempt=mutation_attempt,
+                            parent_code=initial_code,
+                            parent_performance=seed_perf,
+                            failure_examples=[],
+                            max_repair_attempts=self.config.max_repair_attempts,
+                            architect_temperature=arch_temp,
+                            repair_temperature=repair_temp,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        child_protocol, child_code_or_error = None, f"init mutation exception: {exc}"
+                    if child_protocol is None:
+                        reason = str(child_code_or_error)[:200]
+                        print(f"[Init] mutation rejected: {reason}")
+                        self._append_jsonl(
+                            self.generation_trace_path,
+                            {
+                                "run_id": self.run_id,
+                                "event": "init_population_mutation_rejected",
+                                "time": self._now_iso(),
+                                "slot": slot,
+                                "attempt": attempt + 1,
+                                "temperature": arch_temp,
+                                "reason": str(child_code_or_error)[:320],
+                            },
+                        )
+                        continue
+
+                    child_code = str(child_code_or_error)
+                    child_sha = self.archive.save(
+                        child_code,
+                        generation=0,
+                        parent_sha=init_sha,
+                    )
+                    if child_sha in seen_shas:
+                        self._append_jsonl(
+                            self.generation_trace_path,
+                            {
+                                "run_id": self.run_id,
+                                "event": "init_population_mutation_duplicate",
+                                "time": self._now_iso(),
+                                "slot": slot,
+                                "attempt": attempt + 1,
+                                "temperature": arch_temp,
+                                "child_sha": child_sha,
+                            },
+                        )
+                        continue
+
+                    seen_shas.add(child_sha)
+                    accepted_candidate = {
+                        "sha": child_sha,
+                        "code": child_code,
+                        "protocol": child_protocol,
+                        "fitness": 0.0,
+                        "selection_score": 0.0,
+                        "answer_accuracy": 0.0,
+                        "mode_accuracy": {},
+                        "failures": [],
+                    }
+                    print(f"[Init] mutation accepted child={child_sha}")
+                    self._append_jsonl(
+                        self.generation_trace_path,
+                        {
+                            "run_id": self.run_id,
+                            "event": "init_population_mutation_accepted",
+                            "time": self._now_iso(),
+                            "slot": slot,
+                            "attempt": attempt + 1,
+                            "temperature": arch_temp,
+                            "child_sha": child_sha,
+                            "parent_sha": init_sha,
+                        },
+                    )
+                    break
+
+            if accepted_candidate is None:
+                cloned_protocol, _ = self.loader.load_from_code(initial_code)
+                print("[Init] fallback to seed clone")
+                accepted_candidate = {
+                    "sha": init_sha,
+                    "code": initial_code,
+                    "protocol": cloned_protocol if cloned_protocol is not None else initial_protocol,
+                    "fitness": 0.0,
+                    "selection_score": 0.0,
+                    "answer_accuracy": 0.0,
+                    "mode_accuracy": {},
+                    "failures": [],
+                }
+            population.append(accepted_candidate)
+
+        unique_shas = len({str(item.get("sha", "")) for item in population if str(item.get("sha", ""))})
+        print(f"[Init] population ready size={len(population)} unique_shas={unique_shas}")
+        return population
+
+    def _stabilize_selection_score(
+        self,
+        candidate_sha: str,
+        raw_selection_score: float,
+        generation: int,
+    ) -> float:
+        """Blend current score with same-SHA history to reduce single-gen noise."""
+
+        score = float(raw_selection_score)
+        sha = str(candidate_sha or "").strip()
+        if not sha:
+            return score
+
+        history = self._selection_history_by_sha.get(sha, [])
+        current_weight = float(self.config.elite_score_current_weight)
+        if history and current_weight < 1.0:
+            history_mean = float(sum(history) / len(history))
+            score = (current_weight * score) + ((1.0 - current_weight) * history_mean)
+
+        seen_generations = self._selection_history_generations.setdefault(sha, set())
+        if generation not in seen_generations:
+            self._selection_history_by_sha.setdefault(sha, []).append(float(raw_selection_score))
+            seen_generations.add(generation)
+
+        return float(score)
 
     @staticmethod
     def _build_parent_performance(
@@ -1174,10 +1490,12 @@ class EvolutionEngine:
             # wrong answers rank below protocols with no tests at all.
             false_positive_rate = float(eval_summary.get("false_positive_rate", 0.0))
             sanitized_test_drop_rate = float(eval_summary.get("sanitized_test_drop_rate", 0.0))
+            adversarial_test_pass_rate = float(eval_summary.get("adversarial_test_pass_rate", 0.0))
             return (
                 accuracy
-                - 0.5 * false_positive_rate
+                - 0.6 * false_positive_rate
                 - 0.25 * sanitized_test_drop_rate
+                - 0.25 * adversarial_test_pass_rate
                 + 1e-3 * float(fitness)
                 + 1e-4 * execution_rate
                 + 1e-5 * compilation_rate
@@ -1193,18 +1511,19 @@ class EvolutionEngine:
         )
 
     @staticmethod
-    def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
-        """Sort key that prioritizes answer accuracy over proxy runtime metrics."""
+    def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+        """Sort key with stability-aware selection score first."""
 
         summary = item.get("eval_summary", {})
         if not isinstance(summary, dict):
             summary = {}
         accuracy = float(item.get("answer_accuracy", summary.get("accuracy", 0.0)))
+        selection_score = float(item.get("selection_score", accuracy))
         fitness = float(item.get("fitness", 0.0))
         execution_rate = float(summary.get("execution_success_rate", 1.0))
         compilation_rate = float(summary.get("compilation_success_rate", 1.0))
         test_pass_rate = float(summary.get("avg_test_pass_rate", 0.0))
-        return (accuracy, fitness, execution_rate, compilation_rate, test_pass_rate)
+        return (selection_score, accuracy, fitness, execution_rate, compilation_rate, test_pass_rate)
 
     def _build_failure_feedback(self, record: TaskRecord) -> dict[str, Any]:
         """Create structured failure analysis for mutation feedback."""
@@ -1384,6 +1703,7 @@ class EvolutionEngine:
         is_cas: bool = False,
         is_tdg: bool = False,
         test_pass_rate_values: list[float] | None = None,
+        adversarial_test_pass_rate_values: list[float] | None = None,
         false_positive_count: int = 0,
         sanitized_test_drop_count: int = 0,
         raw_test_count: int = 0,
@@ -1481,7 +1801,13 @@ class EvolutionEngine:
 
         if is_tdg and test_pass_rate_values is not None:
             avg_tpr = (sum(test_pass_rate_values) / len(test_pass_rate_values)) if test_pass_rate_values else 0.0
+            avg_adv_tpr = (
+                (sum(adversarial_test_pass_rate_values) / len(adversarial_test_pass_rate_values))
+                if adversarial_test_pass_rate_values
+                else 0.0
+            )
             summary["avg_test_pass_rate"] = float(avg_tpr)
+            summary["adversarial_test_pass_rate"] = float(avg_adv_tpr)
             summary["false_positive_count"] = int(false_positive_count)
             summary["false_positive_rate"] = float(false_positive_count) / float(max(1, num_tasks))
             summary["sanitized_test_drop_count"] = int(sanitized_test_drop_count)

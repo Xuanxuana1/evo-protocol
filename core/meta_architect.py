@@ -297,6 +297,8 @@ class MetaArchitect:
                - Use self._call_llm() to generate a natural language answer
                - If messages_raw is provided, reconstruct structured messages
                - No truncation of context -- use full text (key advantage over CaS)
+               - Use a two-pass strategy: draft answer first, then run a short
+                 self-check against extracted constraints before returning
                - Return the answer string
 
             IMPORTANT: Do NOT implement run() or any execution logic.
@@ -374,11 +376,16 @@ class MetaArchitect:
               Avoid overly strict tests that reject valid answers.
             - F1 (Parametric Override): Add anti-override tests from extracted
               requirements (exact phrase, role/style constraints, context-over-prior
-              conflicts) instead of hardcoded task-specific assertions.
+              conflicts) instead of hardcoded task-specific assertions. Include a
+              reusable forbidden-term template:
+                answer_lower = answer.lower()
+                forbidden_terms = [ ... ]  # derived from context/query contradictions
+                assert not any(t in answer_lower for t in forbidden_terms)
             - F2 (Context Navigation): Write tests checking that key evidence
               from context appears in the answer.
-            - F3 (Reasoning Breakdown): Add tests for intermediate reasoning
-              steps and logical consistency.
+            - F3 (Reasoning Breakdown): Use checklist-style tests where each
+              rubric constraint gets its own `test_*` function with one clear
+              assertion and explicit failure message.
             - F4 (Induction Failure): Write tests checking pattern application
               from given examples.
             - Low accuracy despite high test_pass_rate: Tests are too permissive.
